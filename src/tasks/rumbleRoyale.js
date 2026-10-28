@@ -10,22 +10,28 @@
 //
 // Timeline (task statuses: pending -> announced -> running -> done/cancelled):
 //   T - RUMBLE_PRE_ANNOUNCE_MINUTES  heads-up ping (skipped if the start was sooner than that)
-//   T                                join message + Join button (state.phase = "join")
-//   T + join_minutes                 button disabled; too few players = cancel, else rounds (phase "rounds")
+//   T  (hosting)                     P1: join message + Join button + verified role ping (state.phase = "join")
+//   S - RUMBLE_REMIND_BEFORE_SECONDS P2: reminder ping (or the boss's "remind N min before"; none for windows < 4 min)
+//   halfway                          reminder without a ping, only for windows of 10+ minutes
+//   S - RUMBLE_FINAL_PING_SECONDS    P3: "10 seconds" ping
+//   S = T + join_minutes             P4: button disabled; too few players = cancel, else "game starting" ping + rounds
+//   P2, P3 and S run on precise timers from the absolute times saved in the task state (1 s tolerance).
+//   The join window can be 1 minute to RUMBLE_MAX_JOIN_MINUTES (default 24 h).
 //   every RUMBLE_ROUND_SECONDS (>=3) one embed card per round, sent one at a time; some rounds revive a player
 //   2 players left                   "3… 2… 1…" message, ~4 s, FINAL DUEL card
 //   1 player left                    payout, winner card, runners-up card, congratulation message (~2 s apart)
 //   RUMBLE_MAX_MINUTES after the rounds start: safety timeout, ends with no winner
 //
 // Restart safety: the task row holds everything (players are saved every ~10s and after each round).
-//   restart in the join window -> players restored, countdown continues
+//   restart in the join window -> players restored, countdown continues, pings whose time passed are skipped
 //   restart mid-rounds          -> ended safely, no winner and no payout (unless the winner was already recorded)
 const crypto = require('crypto');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags, PermissionFlagsBits, escapeMarkdown } = require('discord.js');
 const config = require('../config');
 const store = require('./store');
 const { report } = require('./report');
-const { fmtUtc } = require('./time');
+const { when, fmtDuration, fmtSeconds, bossLocal, bossWall, resolveTime } = require('./time');
+const orderTime = require('./orderTime');
 const identity = require('../identity');
 const supabase = require('../db');
 const points = require('../points');
@@ -111,21 +117,13 @@ function classifyPrize(raw) {
   return { prize, prize_type: 'ticket', prize_points: null };
 }
 
-// Join window length from the boss's own words: "10 minute", "5 min", "10 minute dhore", "15 minutes".
-// "in 10 minutes" / "10 min por" mean the START time, so they are skipped. null = not stated.
+// Join window length from the boss's own words: "10 minute", "5 min", "10 minute dhore", "2 hours".
+// "in 10 minutes" / "10 min por" mean the HOSTING time, so they are skipped. null = not stated.
+// (orderTime.js reads the whole order; this is the same rule for one bare duration.)
 function parseJoinMinutes(input) {
-  const text = String(input || '');
-  const re = /(\d{1,3})\s*-?\s*(?:m|min|mins|mint|minit|minute|minutes|মিনিট)(?![a-z])/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    const before = text.slice(0, m.index);
-    const after = text.slice(m.index + m[0].length);
-    if (/\b(in|after|within)\s*$/i.test(before)) continue; // "in 10 minutes"
-    if (/^\s*(por|pore|পর|পরে|later|after|baad|bad|theke)(?![a-z])/i.test(after)) continue; // "10 min por"
-    const n = Number(m[1]);
-    if (n >= 1 && n <= 60) return n;
-  }
-  return null;
+  const w = orderTime.readOrder(input, { kind: 'rumble' }).starts.find((s) => s.type === 'window');
+  const n = w ? Math.round(w.ms / MIN) : null;
+  return n !== null && n >= 1 && n <= R().maxJoinMinutes ? n : null;
 }
 
 // "min 5 players", "minimum 5 players", "5 players minimum"
@@ -135,14 +133,18 @@ function parseMinPlayers(text) {
 }
 
 // The ONE place params are built, for both entry points. { params } or { error }
-function buildRumbleParams({ join_minutes, prize, min_players } = {}) {
+// remind_before_seconds: the boss's own "remind N min before" list (only stored when he gave one)
+function buildRumbleParams({ join_minutes, prize, min_players, remind_before_seconds } = {}) {
   const channelId = rumbleChannelId();
   if (!channelId) return { error: MISSING_CHANNEL };
   const jm = join_minutes === null || join_minutes === undefined || join_minutes === '' ? R().defaultJoinMinutes : Number(join_minutes);
-  if (!Number.isInteger(jm) || jm < 1 || jm > 60) return { error: 'The join window must be 1 to 60 minutes.' };
+  if (!Number.isInteger(jm) || jm < 1 || jm > R().maxJoinMinutes) return { error: `The join window must be 1 minute to ${fmtDuration(R().maxJoinMinutes)}.` };
   const mp = min_players === null || min_players === undefined || min_players === '' ? R().minPlayers : Number(min_players);
   if (!Number.isInteger(mp) || mp < 1 || mp > R().maxPlayers) return { error: `Min players must be between 1 and ${R().maxPlayers}.` };
-  return { params: { channel_id: channelId, join_minutes: jm, ...classifyPrize(prize), min_players: mp } };
+  const params = { channel_id: channelId, join_minutes: jm, ...classifyPrize(prize), min_players: mp };
+  const remind = (Array.isArray(remind_before_seconds) ? remind_before_seconds : []).map(Number).filter((s) => Number.isInteger(s) && s > 0);
+  if (remind.length) params.remind_before_seconds = [...new Set(remind)].sort((a, b) => b - a);
+  return { params };
 }
 
 const isBigPrize = (params) => params.prize_type === 'points' && params.prize_points > R().maxPointsPrize;
@@ -161,20 +163,54 @@ function prizeLine(p) {
   return 'No prize this time, just eternal glory';
 }
 
-// Summary shown before scheduling (control channel and /rumble preview)
+// ---------------------------------------------------------------- ping schedule (shared: summary + engine)
+// Which verified-role pings a join window gets, in seconds before the game start:
+//   reminders: the boss's "remind N min before" list, else RUMBLE_REMIND_BEFORE_SECONDS (none when the window
+//              is shorter than 4 minutes). A reminder must fit inside the window and come before the final ping.
+//   final:     RUMBLE_FINAL_PING_SECONDS ("10 seconds" ping), when the window is longer than that
+//   skipped:   the boss's own reminders that do not fit (shown in the summary, never dropped silently)
+function pingPlan(windowMs, params = {}) {
+  const custom = Array.isArray(params.remind_before_seconds) && params.remind_before_seconds.length > 0;
+  const want = custom ? params.remind_before_seconds : windowMs < 4 * MIN ? [] : [Number(R().remindBeforeSeconds) || 0].filter(Boolean);
+  const finalS = Number(R().finalPingSeconds) || 0;
+  const final = finalS > 0 && windowMs > finalS * 1000 ? finalS : null;
+  const reminders = [];
+  const skipped = [];
+  for (const s of [...new Set(want)].sort((a, b) => b - a)) (s * 1000 < windowMs && s > (final || 0) ? reminders : skipped).push(s);
+  return { reminders, final, skipped: custom ? skipped : [] };
+}
+
+// "Pings: when hosting, 2 min before the start, 10 s before the start, at the start"
+function pingsLine(plan, { headsUp = false } = {}) {
+  const parts = [];
+  if (headsUp) parts.push(`${R().preAnnounceMinutes} min before hosting (heads-up)`);
+  parts.push('when hosting');
+  for (const s of plan.reminders) parts.push(`${fmtSeconds(s)} before the start`);
+  if (plan.final) parts.push(`${fmtSeconds(plan.final)} before the start`);
+  parts.push('at the start');
+  return `Pings: ${parts.join(', ')}`;
+}
+
+// Summary shown before scheduling (control channel and /rumble preview). Times are Discord timestamps
+// only: every viewer sees their own local time, and no zone name or "UTC" is ever written.
 function summary(params, runAt) {
-  const end = new Date(new Date(runAt).getTime() + params.join_minutes * MIN);
+  const host = new Date(runAt);
+  const start = new Date(host.getTime() + params.join_minutes * MIN);
+  const plan = pingPlan(params.join_minutes * MIN, params);
   let prize;
-  if (params.prize_type === 'points') prize = `**${params.prize_points} points** (type: points). ${params.prize_points} points will be sent automatically to the winner.`;
-  else if (params.prize_type === 'ticket') prize = `**${escapeMarkdown(params.prize)}** (type: ticket, the winner opens a ticket and the team delivers it)`;
-  else prize = 'none';
+  if (params.prize_type === 'points') prize = `Prize: **${params.prize_points} points**, sent automatically to the winner`;
+  else if (params.prize_type === 'ticket') prize = `Prize: **${escapeMarkdown(params.prize)}**, claimed via ticket`;
+  else prize = 'Prize: none';
+  const headsUp = R().preAnnounceMinutes > 0 && host.getTime() - Date.now() >= R().preAnnounceMinutes * MIN;
   const lines = [
     `**${label}** in <#${params.channel_id}>`,
-    `Join opens: ${ts(runAt, 't')} (${ts(runAt, 'R')})`,
-    `Join window closes: ${ts(end, 't')} (${ts(end, 'R')}) · ${params.join_minutes} min`,
-    `Prize: ${prize}`,
+    `Hosting (join opens): ${when(host)}`,
+    `Game starts: ${when(start)} · join window: ${fmtDuration(params.join_minutes)}`,
+    prize,
     `Min players: ${params.min_players}`,
+    pingsLine(plan, { headsUp }),
   ];
+  for (const s of plan.skipped) lines.push(`⚠️ "Remind ${fmtSeconds(s)} before" does not fit in this join window, so that reminder is skipped.`);
   if (isBigPrize(params)) lines.push(`⚠️ **That is more than ${R().maxPointsPrize} points.** Double-check it, this needs a second confirm.`);
   return lines.join('\n');
 }
@@ -210,55 +246,177 @@ async function createRumble({ params, runAt, createdBy, source }) {
 // ---------------------------------------------------------------- what the AI is told (control channel only)
 function about() {
   return (
-    'Rumble Royale: a battle-royale elimination game in the Rumble channel (RUMBLE_CHANNEL_ID). At the start time Vexo ' +
-    'posts a Join button (pings the verified role); after the join window (1-60 min, default ' +
-    `${R().defaultJoinMinutes}) rounds run automatically and random players are eliminated until one wins. ` +
+    'Rumble Royale: a battle-royale elimination game in the Rumble channel (RUMBLE_CHANNEL_ID). At the hosting time Vexo ' +
+    `posts a Join button (pings the verified role); after the join window (1 minute to ${fmtDuration(R().maxJoinMinutes)}, default ` +
+    `${R().defaultJoinMinutes} min) rounds run automatically and random players are eliminated until one wins. ` +
+    'Before the start the verified role gets a reminder ping and a 10-second ping. ' +
     'Prize: "N points" is paid automatically; any other prize (SOL, NFT, WL...) is claimed through a ticket. ' +
     `Min players default ${R().minPlayers}. Fully automatic, no AI during the game. Also available as /rumble.`
   );
 }
 const fields =
-  '"join_minutes" (JOIN WINDOW length 1-60: "10 minute", "5 min", "10 minute dhore", "15 minutes" = 10/5/10/15. ' +
-  'This is NOT the start time), "prize" (exact text as written: "100 points", "1 SOL", "NFT", or null), "min_players" (integer or null)';
+  '"time" = the HOSTING time (when the join window opens: "host a rumble at 8 pm", "rumble at 8pm"); ' +
+  '"play_after" (game start as a duration after hosting, text as written: "30 min", "4 hours", "1.5 hours", or null); ' +
+  '"play_at" (game start as a clock time, same format as time, or null); "join_closes" ("join window closes 7.35 pm", same format as time, or null); ' +
+  '"join_minutes" (a bare join window length in minutes: "10 minute", "5 min", "10 minute dhore" = 10/5/10, or null); ' +
+  '"remind_before" (list of durations as written, "remind 10 min before" = ["10 min"], else []); ' +
+  '"prize" (exact text as written: "100 points", "1 SOL", "NFT", or null), "min_players" (integer or null)';
 
 // one line per task for the AI prompt (no secrets: players and winner are not included)
-function aiLine(t, { bossLocal }) {
+function aiLine(t, { bossLocal: local }) {
   const p = t.params || {};
   return (
-    `#${t.id} rumble_royale | boss clock ${bossLocal(t.run_at)} | shown as ${fmtUtc(t.run_at)} | status ${t.status}` +
-    ` | join ${p.join_minutes} min | prize ${p.prize || 'none'} | min players ${p.min_players}`
+    `#${t.id} rumble_royale | hosting on boss clock ${local(t.run_at)} | status ${t.status}` +
+    ` | join window ${fmtDuration(p.join_minutes)} | prize ${p.prize || 'none'} | min players ${p.min_players}`
   );
 }
 
-// Control channel order -> plan (the control channel shows it and runs create() after "yes").
-//   text: the boss's own words (durations / min players are read from them in code, the AI only helps)
-async function planOrder({ ai, text, checkTime, createdBy }) {
+// Control channel order -> plan. The control channel shows it and runs create() after "yes".
+// Code reads the boss's own words (orderTime.js); the AI's fields only fill what code did not find.
+//   text:     the boss's message
+//   followUp: a change to the pending order ("make it 9 instead"): the AI merged the details, so the
+//             "did not understand this part" check is skipped for that short message
+// Returns one of:
+//   { summary, describe, draft, doubleCheck, create }      ready for yes/no
+//   { question } / { error }                              one short question / a refusal
+//   { offer: { question, next } }                         past hosting time: "host it right now instead" / "tomorrow"
+//   { choice: { question, options: [{ at, next }] } }      two different game start times: the boss picks one
+const MAX_AHEAD_MS = 30 * 86400000;
+async function planOrder({ ai, text, createdBy, followUp = false }) {
   if (!rumbleChannelId()) return { error: MISSING_CHANNEL };
-  const joinFromText = parseJoinMinutes(text);
-  let time = ai.time;
-  // "rumble 5 minute dhore" is a join window, not "start in 5 minutes"
-  if (time && joinFromText !== null && Number(time.in_minutes) === joinFromText && !/\b(ekhoni|ekhon|now|right now|immediately)\b/i.test(text)) {
-    time = null;
-  }
-  const when = checkTime(time);
-  if (when.question) return { question: when.question };
+  const read = orderTime.readOrder(text, { kind: 'rumble' });
+  const now = Date.now();
+  const aiPrize = typeof ai.prize === 'string' && ai.prize.trim() ? ai.prize.trim() : null;
 
-  const built = buildRumbleParams({
-    join_minutes: joinFromText ?? ai.join_minutes ?? null,
-    prize: ai.prize,
-    min_players: parseMinPlayers(text) ?? ai.min_players ?? null,
-  });
+  // never drop a phrase: anything with a number / time word that was not understood gets ONE question
+  const covered = (s) => aiPrize && (s.toLowerCase().includes(aiPrize.toLowerCase()) || aiPrize.toLowerCase().includes(s.toLowerCase()));
+  const unknown = [...(followUp ? [] : read.leftovers), ...(ai.unknown_parts || []).filter(orderTime.looksTimeish)].filter((s) => !covered(s));
+  if (unknown.length) {
+    const list = [...new Set(unknown)].slice(0, 3).map((s) => `"${s}"`).join(', ');
+    return { question: `I didn't get ${unknown.length === 1 ? 'this part' : 'these parts'}, boss: ${list}. What should I do with ${unknown.length === 1 ? 'it' : 'them'}?` };
+  }
+
+  // ---- hosting time: code first, the AI's "time" only when code found none
+  let hostAt = null;
+  let past = null; // { recent } or { old, tomorrow }
+  const h = read.host;
+  if (h?.type === 'now') hostAt = now;
+  else if (h?.type === 'in') hostAt = now + h.ms;
+  else if (h?.type === 'clock') {
+    const r = orderTime.resolveClockFromNow(h.clock, now);
+    if (!r) return { question: 'What time should I host it, boss?' };
+    if (r.at) hostAt = Math.max(r.at.getTime(), now);
+    else past = r;
+  } else {
+    let t = ai.time;
+    // "rumble 5 minute dhore" is a join window, not "host in 5 minutes"
+    if (t && t.in_minutes && read.starts.some((s) => s.type === 'window' && s.ms === Number(t.in_minutes) * MIN)) t = null;
+    const d = resolveTime(t);
+    if (!d) return { question: 'When should I host it, boss? For example "at 8 pm", "in 20 minutes" or "now".' };
+    if (d.getTime() >= now - MIN) hostAt = Math.max(d.getTime(), now);
+    else if (d.getTime() >= now - 30 * MIN) past = { recent: d };
+    else past = { old: d, tomorrow: new Date(d.getTime() + 86400000) };
+  }
+
+  const details = {
+    prize: aiPrize ?? read.prizeText,
+    min_players: read.minPlayers ?? parseMinPlayers(text) ?? ai.min_players ?? null,
+    remind: read.remind?.secs ?? remindFromAi(ai.remind_before),
+  };
+  const fromHost = (H) => planFromHost({ read, ai, H, details, createdBy });
+
+  // hosting time already passed: offer "now" (up to 30 min late) or the same time tomorrow
+  if (past?.recent) {
+    return { offer: { question: `That was ${ts(past.recent, 'R')}. Host it right now instead, boss?`, next: () => fromHost(Date.now()) } };
+  }
+  if (past?.old) {
+    return { offer: { question: `That was ${ts(past.old, 'R')}. Did you mean tomorrow at ${ts(past.tomorrow, 't')}, boss?`, next: () => fromHost(past.tomorrow.getTime()) } };
+  }
+  if (hostAt > now + MAX_AHEAD_MS) return { question: "That's more than 30 days away, boss. Pick a closer time?" };
+  return fromHost(hostAt);
+}
+
+// "10 min", "2 min" from the AI -> seconds
+const remindFromAi = (list) => {
+  const secs = (Array.isArray(list) ? list : []).map((s) => Math.round((orderTime.parseDuration(String(s)) || 0) / 1000)).filter((s) => s > 0);
+  return secs.length ? secs : null;
+};
+
+// The plan for one hosting instant H (ms). forced = the start the boss picked when two were given.
+async function planFromHost({ read, ai, H, details, createdBy, forced = null }) {
+  // ---- every game start the boss gave, as instants: [{ at, fixed, phrase }]
+  //   fixed = a clock time ("play at 8:30 pm"): stays put if he confirms late; otherwise relative to hosting
+  let starts = [];
+  const bad = [];
+  for (const s of read.starts) {
+    if (s.type === 'after' || s.type === 'window') starts.push({ at: H + s.ms, fixed: false, phrase: s.phrase });
+    else {
+      const d = orderTime.resolveClockAfter(s.clock, H);
+      if (d) starts.push({ at: d.getTime(), fixed: true, phrase: s.phrase });
+      else bad.push(s.phrase);
+    }
+  }
+  if (!read.starts.length) {
+    // code found nothing about the start: the AI's fields
+    const after = ai.play_after ? orderTime.parseDuration(String(ai.play_after)) : null;
+    if (after) starts.push({ at: H + after, fixed: false, phrase: `play after ${ai.play_after}` });
+    if (Number.isInteger(ai.join_minutes) && ai.join_minutes > 0) starts.push({ at: H + ai.join_minutes * MIN, fixed: false, phrase: `join window ${ai.join_minutes} min` });
+    for (const [key, label2] of [['play_at', 'play at'], ['join_closes', 'join window closes']]) {
+      const d = resolveTime(ai[key]);
+      if (d && d.getTime() > H) starts.push({ at: d.getTime(), fixed: true, phrase: label2 });
+      else if (ai[key]) bad.push(label2);
+    }
+  }
+  if (bad.length) return { question: `"${bad[0]}" is not after the hosting time (${ts(H, 't')}), boss. When should the game start?` };
+  if (forced) starts = [forced];
+
+  // ---- two different starts (more than 1 minute apart): ONE question, both as Discord timestamps
+  const distinct = [];
+  for (const s of starts.sort((a, b) => a.at - b.at)) if (!distinct.some((d) => Math.abs(d.at - s.at) <= MIN)) distinct.push(s);
+  if (distinct.length > 1) {
+    const opts = distinct.slice(0, 3);
+    const names = ['first', 'second', 'third'];
+    const lines = opts.map((o, i) => `${i + 1}. ${ts(o.at, 't')} (${ts(o.at, 'R')}) from "${o.phrase}"`);
+    return {
+      choice: {
+        question: `Two different game start times in your order, boss:\n${lines.join('\n')}\nWhich one, ${names.slice(0, opts.length).join(' or ')}?`,
+        options: opts.map((o) => ({ at: o.at, next: () => planFromHost({ read, ai, H, details, createdBy, forced: o }) })),
+      },
+    };
+  }
+
+  const start = distinct[0] || { at: H + R().defaultJoinMinutes * MIN, fixed: false, phrase: 'default join window' };
+  const windowMin = Math.round((start.at - H) / MIN);
+  if (windowMin < 1) return { question: 'The game has to start at least 1 minute after hosting, boss. When should it start?' };
+  if (windowMin > R().maxJoinMinutes) {
+    return { error: `That join window is ${fmtDuration(windowMin)}, boss. The longest I can do is ${fmtDuration(R().maxJoinMinutes)} (RUMBLE_MAX_JOIN_MINUTES).` };
+  }
+
+  const built = buildRumbleParams({ join_minutes: windowMin, prize: details.prize, min_players: details.min_players, remind_before_seconds: details.remind });
   if (built.error) return { error: built.error };
   const { params } = built;
   const clash = await findClash(params.channel_id);
   if (clash) return { error: clashText(clash) };
 
+  const reminders = pingPlan(windowMin * MIN, params).reminders.map(fmtSeconds).join(', ') || 'none';
   return {
-    summary: summary(params, when.date),
-    describe: `schedule rumble_royale at ${fmtUtc(when.date, { relative: false })}, join ${params.join_minutes} min, prize ${params.prize || 'none'}, min players ${params.min_players}`,
-    draft: { task_type: type, prize: params.prize, join_minutes: params.join_minutes, min_players: params.min_players, time },
+    summary: summary(params, H),
+    describe:
+      `schedule rumble_royale: hosting at boss clock ${bossLocal(H)}, game starts at boss clock ${bossLocal(H + windowMin * MIN)}, ` +
+      `join window ${fmtDuration(windowMin)}, prize ${params.prize || 'none'}, min players ${params.min_players}, reminders ${reminders} before the start`,
+    draft: {
+      task_type: type, prize: params.prize, join_minutes: windowMin, min_players: params.min_players,
+      remind_before: (params.remind_before_seconds || []).map((s) => `${s} sec`),
+      time: H - Date.now() < MIN ? { in_minutes: 0 } : { local: bossWall(H), zone: null },
+    },
     doubleCheck: isBigPrize(params) ? `⚠️ Second check: **${params.prize_points} points** is above RUMBLE_MAX_POINTS_PRIZE (${R().maxPointsPrize}).` : null,
-    create: () => createRumble({ params, runAt: when.date, createdBy, source: 'vexo' }),
+    // confirmed late: hosting moves to "now"; a clock-time start stays put, a relative one moves along
+    create: () => {
+      const host = Math.max(H, Date.now());
+      const jm = start.fixed ? Math.round((start.at - host) / MIN) : windowMin;
+      if (jm < 1) return { error: 'That start time has passed while we were talking, boss. Send the order again with a new time.' };
+      return createRumble({ params: { ...params, join_minutes: Math.min(jm, R().maxJoinMinutes) }, runAt: new Date(host), createdBy, source: 'vexo' });
+    },
   };
 }
 
@@ -277,7 +435,7 @@ function phaseText(task) {
 function describe(task) {
   const p = task.params || {};
   return (
-    `**#${task.id}** ${label} · ${ts(task.run_at, 't')} (${ts(task.run_at, 'R')}) · <#${task.channel_id}> · join ${p.join_minutes} min` +
+    `**#${task.id}** ${label} · ${ts(task.run_at, 't')} (${ts(task.run_at, 'R')}) · <#${task.channel_id}> · join ${fmtDuration(p.join_minutes)}` +
     ` · ${prizeShort(p)} · min ${p.min_players} players · ${phaseText(task)}`
   );
 }
@@ -349,6 +507,7 @@ function newGame(task, client, state) {
     roundLog: [], // per round: start / after eliminations / end counts and the revived player
     joinMsg: null,
     pulse: null,
+    timers: [], // precise join-window timers (reminder, final ping, start)
     timer: null,
     safety: null,
     dirty: false,
@@ -409,8 +568,8 @@ async function openJoin(task, client) {
     joinEndsAt: now + (task.params?.join_minutes || R().defaultJoinMinutes) * MIN,
     players: [],
     halfwaySent: false,
-    lastMinuteSent: false,
   };
+  state.pings = pingTimes(state, task.params || {}); // absolute times, saved: a restart keeps the same schedule
   if (!(await store.update(task.id, { status: 'running', state }, ['pending', 'announced']))) return; // cancelled meanwhile
 
   const game = newGame(task, client, state);
@@ -432,6 +591,7 @@ async function openJoin(task, client) {
     return report(client, `⚠️ Rumble #${task.id} was cancelled: I couldn't post the join message in <#${task.channel_id}> (${err.message}).`);
   }
   startPulse(game);
+  schedulePings(game);
 }
 
 function startPulse(game) {
@@ -439,7 +599,72 @@ function startPulse(game) {
   game.pulse = setInterval(() => pulse(game).catch((err) => console.error(`rumble #${game.taskId} pulse:`, err.message)), PULSE_MS);
 }
 
-// join window heartbeat: close on time, reminders, live count, periodic save
+// ---------------------------------------------------------------- precise join-window pings (P2, P3) and the start (P4)
+const PING_TOLERANCE_MS = 1000; // a ping more than 1 s overdue (e.g. after a restart) is skipped, never sent late
+const TIMER_STEP_MS = 30 * 1000; // long waits re-check the real clock every 30 s (drift correction)
+
+// absolute ping times for a join window (stored in the task state)
+function pingTimes(state, params) {
+  const plan = pingPlan(state.joinEndsAt - state.joinOpenedAt, params);
+  return [
+    ...plan.reminders.map((s) => ({ kind: 'reminder', before: s, at: state.joinEndsAt - s * 1000, sent: false })),
+    ...(plan.final ? [{ kind: 'final', before: plan.final, at: state.joinEndsAt - plan.final * 1000, sent: false }] : []),
+  ];
+}
+
+// run fn at the absolute time `at`. The timer is re-armed in short steps from the real clock, so it
+// never drifts; everything is cleared on close, cancel and end.
+function armAt(game, at, fn) {
+  const step = () => {
+    if (game.ended || game.phase !== 'join') return;
+    const left = at - Date.now();
+    if (left > 0) {
+      game.timers.push(timing.setTimer(step, Math.min(left, TIMER_STEP_MS)));
+      return;
+    }
+    fn().catch((err) => console.error(`rumble #${game.taskId} timer:`, err.message));
+  };
+  step();
+}
+function clearTimers(game) {
+  for (const t of game.timers || []) timing.clearTimer(t);
+  game.timers = [];
+}
+
+// (re)arm every ping that is still ahead; after a restart the ones whose time passed are skipped
+function schedulePings(game) {
+  clearTimers(game);
+  const s = game.state;
+  if (!Array.isArray(s.pings)) s.pings = pingTimes(s, game.params); // a row saved before this version
+  const now = Date.now();
+  for (const p of s.pings) {
+    if (p.sent) continue;
+    if (p.at < now - PING_TOLERANCE_MS) {
+      p.sent = true;
+      p.skipped = true;
+      game.dirty = true;
+      continue;
+    }
+    armAt(game, p.at, () => sendPing(game, p));
+  }
+  armAt(game, s.joinEndsAt, () => closeJoin(game)); // P4 on time (the 2 s pulse is the backup)
+}
+
+// P2 reminder ("starts at <t> (<R>)") or P3 final "10 seconds" ping, verified role only
+async function sendPing(game, p) {
+  if (p.sent || game.ended || game.phase !== 'join') return;
+  p.sent = true;
+  const ping = rolePing();
+  const end = game.state.joinEndsAt;
+  const text =
+    p.kind === 'final'
+      ? draw(game, 'finalPing')
+      : `${fill(draw(game, 'reminderPing'), { start_time: ts(end, 't'), start_relative: ts(end, 'R') })} (**${game.players.size}** joined so far)`;
+  await safePost(game, ping.text + text, ping.allowed);
+  await saveState(game);
+}
+
+// join window heartbeat: close on time (backup for the timer), halfway note, live count, periodic save
 async function pulse(game) {
   if (game.ended || game.phase !== 'join' || game.pulsing) return;
   game.pulsing = true;
@@ -449,17 +674,11 @@ async function pulse(game) {
     if (now >= s.joinEndsAt) return await closeJoin(game);
     const total = s.joinEndsAt - s.joinOpenedAt;
     const count = ` (**${game.players.size}** joined so far)`;
-    // reminders only when they fit: halfway needs a 3+ min window, "1 minute left" a 2+ min window
-    if (!s.halfwaySent && total >= 3 * MIN && now >= s.joinOpenedAt + total / 2 && s.joinEndsAt - now > 1.5 * MIN) {
+    // halfway note (no ping) only for windows of 10+ minutes
+    if (!s.halfwaySent && total >= 10 * MIN && now >= s.joinOpenedAt + total / 2 && s.joinEndsAt - now > 1.5 * MIN) {
       s.halfwaySent = true;
       game.dirty = true;
       await safePost(game, draw(game, 'halfwayReminder') + count);
-    }
-    if (!s.lastMinuteSent && total >= 2 * MIN && now >= s.joinEndsAt - MIN) {
-      s.lastMinuteSent = true;
-      game.dirty = true;
-      const ping = rolePing();
-      await safePost(game, ping.text + draw(game, 'lastMinuteReminder') + count, ping.allowed);
     }
     if (game.countDirty && now - game.lastCountEdit >= COUNT_EDIT_MS) await editJoin(game);
     if (game.dirty && now - game.lastSave >= SAVE_MS) await saveState(game);
@@ -472,6 +691,7 @@ async function closeJoin(game) {
   if (game.phase !== 'join' || game.ended) return;
   game.phase = 'closing';
   clearInterval(game.pulse);
+  clearTimers(game);
   await editJoin(game, true);
 
   const players = [...game.players.values()];
@@ -504,8 +724,17 @@ const FINAL_SUSPENSE_MS = 4000; // "3… 2… 1…" before the final duel
 const END_GAP_MS = 2000; // between the final duel, winner card, runners-up card and congrats
 const roundSeconds = () => Math.max(MIN_ROUND_SECONDS, Number(R().roundSeconds) || 0);
 const roundMs = () => roundSeconds() * 1000;
-// the only way the game waits; tests swap it for an instant fake that records the delays
-const timing = { sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
+// the only way the game waits; tests swap it for an instant fake that records the delays.
+// setTimer / clearTimer: the join-window ping timers (unref: they never keep a stopping process alive)
+const timing = {
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  setTimer: (fn, ms) => {
+    const t = setTimeout(fn, ms);
+    t.unref?.();
+    return t;
+  },
+  clearTimer: (t) => clearTimeout(t),
+};
 
 // wait between cards; shows "Vexo is typing…" at most once per wait
 async function pause(game, ms, { typing = false } = {}) {
@@ -797,6 +1026,7 @@ async function endGame(game, reason, pay = null) {
   if (game.ended) return;
   game.ended = true;
   clearInterval(game.pulse);
+  clearTimers(game);
   clearTimeout(game.timer);
   clearTimeout(game.safety);
   games.delete(game.channelId);
@@ -862,6 +1092,7 @@ async function resume(task, client) {
     if (s.joinMsgId) game.joinMsg = await channel.messages.fetch(s.joinMsgId).catch(() => null);
     game.countDirty = true;
     startPulse(game);
+    schedulePings(game); // future pings only; the ones whose time passed while I was offline are skipped
     return report(client, `⚠️ I restarted during the join window of Rumble #${task.id}. ${game.players.size} player(s) restored, the countdown continues.`);
   }
 
@@ -889,7 +1120,7 @@ async function markMissed(task, client) {
     const channel = await getTextChannel(client, task.channel_id);
     if (channel) await channel.send({ content: '📅 Change of plans: the Rumble Royale is not happening at the announced time. Stay tuned.', allowedMentions: { parse: [] } }).catch(() => {});
   }
-  await report(client, `⚠️ I was offline at the start time of Rumble #${task.id} (${fmtUtc(task.run_at, { relative: false })}), so I skipped it. Order a new one if you still want it.`);
+  await report(client, `⚠️ I was offline at the start time of Rumble #${task.id} (${ts(task.run_at, 't')}), so I skipped it. Order a new one if you still want it.`);
 }
 
 // ---------------------------------------------------------------- control actions (shared by orders and /rumble)
@@ -1158,6 +1389,7 @@ module.exports = {
   buildRumbleParams,
   createRumble,
   summary,
+  pingPlan,
   payout,
   handleSlash,
   handleButton,
@@ -1167,5 +1399,6 @@ module.exports = {
   _test: {
     games, gameByTask, closeJoin, playRound, previews, getLastEnded: () => lastEnded, globalBags, pulse,
     timing, roundSeconds, roundSecondsNote, rankRunnersUp, newGame, FINAL_SUSPENSE_MS, END_GAP_MS,
+    pingTimes, schedulePings, resume,
   },
 };

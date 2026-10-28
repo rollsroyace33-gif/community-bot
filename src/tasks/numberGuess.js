@@ -22,7 +22,7 @@ const personality = require('../personality');
 const identity = require('../identity');
 const store = require('./store');
 const { report } = require('./report');
-const { fmtUtc } = require('./time');
+const { ts, when } = require('./time');
 const { getTextChannel } = require('../utils');
 
 const type = 'number_guess';
@@ -52,7 +52,7 @@ function vary(list) {
 const mins = (m) => `${m} minute${m === 1 ? '' : 's'}`;
 const prizeText = (p) => (p ? ` Prize: **${p}** 🎁` : '');
 
-// at = start time in UTC, e.g. "14:30 UTC"
+// at = start time as a Discord timestamp ("<t:UNIX:t>": each member sees their own local time)
 const ANNOUNCE = [
   (who, m, p, at) => `${who}🎲 Vexo's **Number Guess Game** starts in **${mins(m)}** (${at})!${p} Stretch those lucky fingers and come join!`,
   (who, m, p, at) => `${who}Heads up! In **${mins(m)}** (${at}) I'm hiding a secret number and you get to hunt it down 🔍${p} Be there!`,
@@ -102,7 +102,7 @@ const TIMEOUT = [
 const CANCELLED = [(n) => `🛑 The boss called this round off. The secret number was **${n}**. Thanks for playing, see you next time!`];
 const RESTARTED = [(n) => `😵 Oops, I glitched and the game got cut short. No winner this round. (The number was **${n}**.) Sorry, we'll play again soon!`];
 const POSTPONED = ['📅 Change of plans: the Number Guess Game is not happening at the announced time. Stay tuned!'];
-const MOVED = [(when) => `📅 Change of plans: the Number Guess Game moved to **${when}**. See you then!`];
+const MOVED = [(at) => `📅 Change of plans: the Number Guess Game moved to **${at}**. See you then!`];
 
 // ---------------------------------------------------------------- what the AI is told
 function about() {
@@ -138,7 +138,7 @@ function buildParams(p) {
 function describe(task) {
   const [lo, hi] = task.params?.range || DEFAULT_RANGE;
   const prize = task.params?.prize ? ` · prize: ${task.params.prize}` : '';
-  return `**#${task.id}** ${label} · ${fmtUtc(task.run_at)} · <#${task.channel_id}> · ${lo}-${hi}${prize} · ${task.status}`;
+  return `**#${task.id}** ${label} · ${when(task.run_at)} · <#${task.channel_id}> · ${lo}-${hi}${prize} · ${task.status}`;
 }
 
 // ---------------------------------------------------------------- helpers
@@ -177,7 +177,7 @@ async function tick(task, { client }) {
     status = 'announced';
     const role = config.verifiedRoleId;
     const left = Math.max(1, Math.round((runAt - now) / MIN));
-    const at = fmtUtc(runAt, { relative: false });
+    const at = ts(runAt, 't');
     await send(client, task.channel_id, vary(ANNOUNCE)(role ? `<@&${role}> ` : '', left, prizeText(task.params?.prize), at), {
       roles: role ? [role] : [], // only the verified role is pinged. never @everyone / @here
     }).catch((err) => report(client, `⚠️ Boss, I couldn't post the announcement for game #${task.id}: ${err.message}`));
@@ -317,7 +317,7 @@ async function markMissed(task, client) {
   }
   await report(
     client,
-    `⚠️ Boss, I was offline at ${fmtUtc(task.run_at, { relative: false })}, so I skipped game #${task.id} instead of starting it late. Give me a new time (or say "run a game now") if you still want it.`
+    `⚠️ Boss, I was offline at ${ts(task.run_at, 't')}, so I skipped game #${task.id} instead of starting it late. Give me a new time (or say "run a game now") if you still want it.`
   );
 }
 
@@ -341,7 +341,7 @@ async function reschedule(task, date, { client, quiet = false }) {
     ['pending', 'announced']
   );
   if (row && task.status === 'announced' && !quiet) {
-    await send(client, task.channel_id, vary(MOVED)(fmtUtc(date))).catch((err) => console.error('game moved message:', err.message));
+    await send(client, task.channel_id, vary(MOVED)(when(date))).catch((err) => console.error('game moved message:', err.message));
   }
   return row;
 }

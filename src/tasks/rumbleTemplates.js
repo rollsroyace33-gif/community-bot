@@ -5,7 +5,7 @@
 //  - Emojis: elimination, final duel, revive and congrats lines carry 1-2 emojis (the first one is the
 //    line's "theme"); every other line has at most one.
 //  - Placeholders are filled in by the code: {victim} {killer} {player} {winner} {prize} {prize_line}
-//    {start_time} {players} {round} {remaining} {kills} {rounds} {points} {min}. Names are already bold.
+//    {start_time} {start_relative} {players} {round} {remaining} {kills} {rounds} {points} {min}. Names are already bold.
 //  - RULES at the bottom says which placeholders each list must / may use, its minimum size and emoji range.
 //    Run `node tests/rumble.test.js` after editing: it checks every list against RULES.
 
@@ -90,15 +90,33 @@ const halfwayReminder = [
   'Psst, the Rumble is still taking fighters. Half the time left.',
 ];
 
-const lastMinuteReminder = [
-  '⏰ **One minute left** to join the Rumble Royale. Last call!',
-  '**60 seconds** until the gates close. Join now or forever be a spectator.',
-  'Final minute! Smash **Join** before the arena locks.',
-  '**One minute** to go. The trampolines are fully inflated.',
-  'Last call for fighters: **one minute** left.',
-  'The doors close in **one minute**. Fortune awaits the brave.',
-  'Tick tock, **one minute** left to join the chaos ⏳',
-  '**One minute** left. Now is the time to be legendary.',
+// verified-role reminder before the game starts (RUMBLE_REMIND_BEFORE_SECONDS, or the boss's "remind N min before").
+// {start_time} = the start as a Discord time, {start_relative} = "in 2 minutes" style Discord timestamp
+const reminderPing = [
+  '⏰ The **Rumble Royale** starts at {start_time} ({start_relative}). Press **Join** now.',
+  'Fighters wanted! The gates close {start_relative}, at {start_time}. Hit **Join** above.',
+  'The arena fills up fast. Rounds start {start_relative} ({start_time}), so grab your spot.',
+  'Last stretch before the chaos: the battle begins at {start_time}, {start_relative} ⚔️',
+  'The rubber chickens are ready. The Rumble kicks off {start_relative} ({start_time}).',
+  "Don't watch from the stands. Join before {start_time}, the fight starts {start_relative}.",
+  'Sign-ups are still open until {start_time}. The first bell rings {start_relative} 🔔',
+  'Fortune favors the button-pressers. The Rumble starts at {start_time} ({start_relative}).',
+  'Helmets on, legends. The gates slam shut {start_relative}, at {start_time}.',
+  'The arena is almost sealed: rounds begin {start_relative} ({start_time}). Press **Join**.',
+];
+
+// verified-role ping RUMBLE_FINAL_PING_SECONDS (default 10) before the start: short hype
+const finalPing = [
+  '🔟 **10 seconds** until the Rumble Royale begins. Last chance to join!',
+  '**Ten seconds** left. The gates are about to slam shut ⏳',
+  'Final countdown: **10 seconds** to the first bell.',
+  '**10 seconds** to go. Brace for chaos 💥',
+  'The arena locks in **10 seconds**. Join now or cheer from the stands.',
+  '**Ten seconds**! The banana peels are in position.',
+  'Almost go time: **10 seconds** until the Rumble starts ⚔️',
+  '**10 seconds** left. Legends, take your places.',
+  'Ten. Seconds. The Rumble Royale is about to begin 🔔',
+  '**10 seconds** until fighting starts. Fortune favors the brave.',
 ];
 
 // ---------------- the battle ----------------
@@ -615,7 +633,8 @@ const RULES = {
   joinFull: { min: 4 },
   joinClosed: { min: 4 },
   halfwayReminder: { min: 8 },
-  lastMinuteReminder: { min: 8 },
+  reminderPing: { min: 10, required: ['start_time', 'start_relative'] },
+  finalPing: { min: 10 },
   gameStart: { min: 10, required: ['players'] },
   roundIntro: { min: 25, required: ['round', 'remaining'] },
   elimination: { min: 150, required: ['victim'], optional: ['killer'], minWith: { killer: 90 }, emoji: EMOJI_1_2 },
@@ -641,7 +660,7 @@ const RULES = {
 
 module.exports = {
   announce, preAnnounce, joinAck, joinAlready, joinNotAllowed, joinFull, joinClosed,
-  halfwayReminder, lastMinuteReminder, gameStart, roundIntro, elimination, revive,
+  halfwayReminder, reminderPing, finalPing, gameStart, roundIntro, elimination, revive,
   finalCountdown, finalDuelIntro, finalDuelElimination,
   banter, banterKills, banterSurvivor, chatReply,
   winner, runnersUpIntro, winnerCongrats, winnerPoints, winnerTicket, winnerNoPrize,

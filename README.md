@@ -32,12 +32,14 @@ community-bot/
     ├── tasks/    control channel + scheduled tasks
     │             control.js (orders), parser.js (AI order -> JSON), scheduler.js (15s check),
     │             registry.js (task types), numberGuess.js (the game), store.js, report.js, time.js,
+    │             orderTime.js (reads times / durations from your orders, in code),
     │             rumbleRoyale.js (Rumble Royale engine), rumbleTemplates.js (all Rumble lines, easy to edit)
     ├── jobs/     daily.js (nightly quality check + top 1), scheduler.js
     └── commands/ ask, points, leaderboard, ticket, rumble,
                   additem, edititem, removeitem, listitems,
                   addpoints, removepoints, pending, refund, rundaily
 tests/boss.test.js            (offline test: boss recognition, no pitch, no game hints. Run: npm test)
+tests/rumble-order.test.js    (offline test: control channel times, Rumble pings. Run: node tests/rumble-order.test.js)
 ```
 
 **You only need to work in 3 places:** `.env`, `knowledge.md`, and Supabase `schema.sql`. You don't need to touch the rest of the code.
@@ -170,8 +172,14 @@ Each message is understood by the AI (one small-model call) with the last 10 mes
 Vexo repeats every change back and only acts after you say yes. A pending change expires after 10 minutes.
 If something important is unclear (morning or night? which game?), it asks one short question.
 
-**Times:** you write times in your own zone (`BOSS_TIMEZONE`, e.g. `11 tay`, `tonight at 10:30`, `in 20 minutes`), or name a zone
-explicitly (`14:00 UTC`). Times are stored in UTC and Vexo always **shows** them in UTC, 24-hour, e.g. `14:30 UTC (in 12 minutes)`.
+**Times:** you write times in your own zone (`BOSS_TIMEZONE`): `4.30 pm`, `4:30pm`, `8 pm`, `20:00`, `tonight 9`, `9 tay`,
+`tomorrow 9 pm`, `now` / `ekhoni`, `in 20 minutes`. A dot between hour and minute (`4.35`) is a time, not a decimal. Write a zone
+only when you mean another one (`14:00 UTC`). The times are read **in code** (`src/tasks/orderTime.js`); the AI only helps with
+the wording. Vexo **shows** every time as a Discord timestamp (`<t:…:t> (<t:…:R>)`), so everyone sees their own local time. It never
+writes "UTC", "GMT", a city or an offset.
+- A time that passed up to 30 minutes ago: *"That was 4 minutes ago. Host it right now instead, boss?"* (a yes runs it now).
+  Longer ago: *"Did you mean tomorrow at …, boss?"*
+- If you say "yes" after a pending order expired (10 minutes), Vexo tells you it expired. Send the order again.
 
 Game timeline (always in `GENERAL_CHANNEL_ID`):
 1. **T-10 min**: announcement that pings `VERIFIED_ROLE_ID` (never @everyone / @here). Posted immediately if you order less than 10 minutes ahead.
@@ -200,10 +208,20 @@ At startup the console says whether the channel was found and warns about missin
 
 **Two ways to host, same game:**
 - **Ask Vexo** in the control channel (English / Bangla / Banglish), then confirm with yes:
+  `Host a rumble at 8 pm, play after 30 min of hosting, prize 20 points` · `rumble at 8pm, play at 8:30 pm, prize NFT` ·
   `aj 9 tay rumble royale chalao, 10 minute, prize 100 points` · `ekhoni rumble start koro 10 min, NFT prize` ·
-  `tonight 10pm rumble royale, 15 minutes, 500 points` · `min 5 players`. "10 minute" / "5 min dhore" is the **join window**,
-  not the start time. `cancel the rumble`, `rumble status` / `list`, reschedule and "run now" work too.
+  `Host a rumble in 2 minutes, play after 4 hours, remind 10 min before` · `min 5 players`.
+  - **Hosting time** ("host a rumble at …", "rumble at …", "now", "in 20 minutes") = when the join window opens.
+  - **Game start** (when the rounds begin), any of: `play after 30 min (of hosting)` / `start after 4 hours` / `2 ghonta pore`,
+    `play at 8:30 pm`, `join window closes 7.35 pm`, or a bare join window (`10 minute`, `5 min dhore`). Nothing given =
+    `RUMBLE_DEFAULT_JOIN_MINUTES`. Durations can be minutes or hours (`1.5 hours`). The window can be up to `RUMBLE_MAX_JOIN_MINUTES`.
+  - **Nothing is dropped:** everything you wrote shows up in the summary. If Vexo can't place a part, it asks about it.
+    If two parts give different start times (for example "closes 7.35 pm" and "play after 4 hours"), it asks once, showing
+    both, and takes a natural answer (`first`, `2`, `7.35`, `yes the first one`).
+  - The summary shows hosting, game start + window length, prize, min players and the pings, all as Discord timestamps.
+  `cancel the rumble`, `rumble status` / `list`, reschedule and "run now" work too.
 - **Slash command** (boss and `STAFF_ROLE_IDS` only, no AI): `/rumble start minutes:5 prize:"100 points" min_players:3 start_in:0`
+  (`minutes` = join window, 1 to `RUMBLE_MAX_JOIN_MINUTES`, default 1440; run `npm run deploy` after changing that limit)
   shows a private preview with **Confirm / Cancel** (2 minutes, only you can press them; nothing is scheduled before Confirm).
   `/rumble cancel` (until the rounds start) and `/rumble status`.
 
@@ -211,9 +229,19 @@ At startup the console says whether the channel was found and warns about missin
 logged in `point_log` as `rumble_royale_prize task #ID`, never twice). Anything else (`1 SOL`, `NFT`, `WL`, `$50`, a role...)
 = the winner opens a ticket and the team delivers it. Empty = no prize. A points prize above `RUMBLE_MAX_POINTS_PRIZE` needs a second confirm.
 
-**How it plays:** at the start time Vexo posts a Join button (pings `VERIFIED_ROLE_ID`; a scheduled game also gets a heads-up
-5 minutes before). Only verified members can join (`RUMBLE_REQUIRE_VERIFIED`). Reminders at halfway and 1 minute left.
-When the window closes: fewer than `RUMBLE_MIN_PLAYERS` = cancelled; otherwise the rounds start.
+**How it plays:** only verified members can join (`RUMBLE_REQUIRE_VERIFIED`). Every ping is a standalone message in the Rumble
+channel that pings `VERIFIED_ROLE_ID` only (never @everyone / @here):
+1. (scheduled games only) a heads-up `RUMBLE_PRE_ANNOUNCE_MINUTES` before hosting
+2. **P1, hosting:** the join card (role ping + prize line) with the Join button
+3. **P2, reminder:** `RUMBLE_REMIND_BEFORE_SECONDS` (120) before the start, e.g. 3 minutes after hosting in a 5-minute window.
+   Your own `remind 10 min before` (one or more) replaces it. No default reminder when the window is shorter than 4 minutes.
+4. **P3, final ping:** `RUMBLE_FINAL_PING_SECONDS` (10) before the start, a short "10 seconds" hype line
+5. **P4, start:** the "game starting" message, then the rounds. Fewer than `RUMBLE_MIN_PLAYERS` = cancelled, and no more pings.
+
+Windows of 10 minutes or more also get a halfway note (no ping). P2, P3 and the start run on precise timers from the exact times saved
+with the task. After a restart, pings whose time already passed are skipped (never sent late) and the rest stay on time.
+Edit the lines in `reminderPing` / `finalPing` (`src/tasks/rumbleTemplates.js`). The `finalPing` lines say "10 seconds", so
+update them if you change `RUMBLE_FINAL_PING_SECONDS`.
 
 - **Round cards:** every round is its own embed card ("⚔️ Round N", red), posted one at a time with `RUMBLE_ROUND_SECONDS`
   between cards (minimum 3; lower values are raised to 3 with a warning at startup). Each card has an intro line, the
@@ -257,6 +285,9 @@ Manage Server; to let a staff role see it, allow it in Server Settings > Integra
 | `RUMBLE_DEFAULT_JOIN_MINUTES` | 5 | Join window when none is given |
 | `RUMBLE_MAX_POINTS_PRIZE` | 100000 | A bigger points prize needs a second confirm |
 | `RUMBLE_PRE_ANNOUNCE_MINUTES` | 5 | Optional: heads-up before a scheduled Rumble |
+| `RUMBLE_MAX_JOIN_MINUTES` | 1440 | Longest join window for control channel orders (24 hours) |
+| `RUMBLE_REMIND_BEFORE_SECONDS` | 120 | Reminder ping this many seconds before the game starts |
+| `RUMBLE_FINAL_PING_SECONDS` | 10 | Final "10 seconds" ping before the game starts |
 
 ### Personality / welcome env vars
 
@@ -294,7 +325,7 @@ Vexo learns **only from the boss (`BOSS_USER_ID`) in the control channel**. It n
 | `GAME_DURATION_MINUTES` | Game length before "no winner" (default 15) |
 | `GAME_MAX_GUESSES_PER_USER` | Guesses per member per game (default 30) |
 | `GAME_ANNOUNCE_MINUTES` | Minutes before start for the announcement (default 10; lower it for testing) |
-| `BOSS_TIMEZONE` | IANA time zone you write order times in. Only used to understand you; everything is shown in UTC |
+| `BOSS_TIMEZONE` | IANA time zone you write order times in. Only used to understand you; times are shown as Discord timestamps (each viewer's own time) |
 
 After updating, run `supabase/schema.sql` again in the Supabase SQL Editor (it's safe to re-run) to create `scheduled_tasks`.
 

@@ -1,10 +1,11 @@
 // Vexo's "brain" for the control channel: ONE small-model call per message that decides the
 // intent, extracts details (time, prize, range...) and writes Vexo's reply.
+// The model only EXTRACTS fields; the real instants are computed in code (orderTime.js / time.js).
 // Task types and their abilities come from the registry, so new types need no change here.
 const { chat } = require('../ai');
 const registry = require('./registry');
 const { personaPrompt } = require('../personality');
-const { bossLocal, utcStamp } = require('./time');
+const { bossLocal } = require('./time');
 
 const INTENTS = [
   'schedule_game', // create a new task
@@ -42,11 +43,12 @@ function systemPrompt() {
     '',
     'Respond with ONLY one JSON object:',
     '{"intent": "...", "task_type": "...", "task_id": null, "time": null, "prize": null, "range": null, "channel": null,',
-    ' "join_minutes": null, "min_players": null, "fact": null, "fact_id": null, "resolves": [], "reply": "..."}',
+    ' "join_minutes": null, "play_after": null, "play_at": null, "join_closes": null, "remind_before": [], "min_players": null,',
+    ' "unknown_parts": [], "fact": null, "fact_id": null, "resolves": [], "reply": "..."}',
     '',
     'INTENTS',
     '- schedule_game: create a task. task_type is one of the task types below (default "number_guess").',
-    '  "rumble", "rumble royale", "royale" = "rumble_royale".',
+    '  "rumble", "rumble royale", "royale" = "rumble_royale". "guess the number", "number guess" = "number_guess".',
     '- reschedule: change the time of an already scheduled task (task_id + time).',
     '- list_tasks: show scheduled tasks ("kon kon game schedule kora ache?").',
     '- cancel_task: cancel a scheduled or running task (task_id).',
@@ -68,23 +70,28 @@ function systemPrompt() {
     '- time: null, or {"in_minutes": N} for "now/ekhoni/ekhon" (0) and "in 20 minutes/20 min por" (20),',
     '  or {"local": "YYYY-MM-DDTHH:mm", "zone": null} = the time exactly as the boss means it on HIS clock. Do NOT convert time zones.',
     '  If the boss explicitly writes a zone ("14:00 UTC", "9pm GMT+1", "10:00 EST"), set "zone" to it ("UTC", "+01:00", "America/New_York").',
+    '  Without a written zone, every time is on the boss\'s clock. A dot between hour and minute is a time ("4.35 pm" = 16:35), not a decimal.',
     '- Task-specific fields:',
     typeFields,
+    '- unknown_parts: for schedule_game, any phrase of the order you could not put into a field (copy it as written), else [].',
+    '  Never leave out something the boss said: if it does not fit a field, it goes here.',
     '- channel: only if the boss explicitly names a channel, else null. Games normally run in the general channel.',
     '- fact: for teach_fact / edit_fact, the fact exactly as the boss stated it (keep his wording, numbers and links; drop only the',
     '  "remember:" / "eta shikho" part). fact_id: number from TAUGHT FACTS. If it is unclear which fact, use clarify.',
     '- resolves: for teach_fact / edit_fact, ids from UNANSWERED QUESTIONS that this fact clearly answers, else [].',
     '',
     'TIME UNDERSTANDING',
-    `- Boss's clock right now: ${bossLocal(new Date())}. UTC right now: ${utcStamp(new Date())}.`,
+    `- Boss's clock right now: ${bossLocal(new Date())}.`,
     '- aj/ajke = today, kal/kalke = tomorrow (for future plans), porshu = day after tomorrow, raat/rat = night, sokal = morning,',
     '  dupur = around noon, bikal = afternoon, sondha/shondha = evening, "11 tay"/"11 ta"/"11 e" = at 11, "sharhe 10" = 10:30, "der ta" = 1:30.',
     '- 12-hour times: decide AM/PM from words (raat, night, tonight, pm -> evening/night; sokal, morning, am -> morning) or clear context',
     '  (for example only one option is still upcoming today). If both are really possible, use clarify: "Morning or night, boss?"',
-    '- Never pick a time that has already passed unless the boss said now.',
-    '- rumble_royale: a bare duration ("10 minute", "5 min", "10 minute dhore", "15 minutes") is join_minutes (the join',
-    '  window), NOT the start time. The start is "now" ({"in_minutes":0}) only for ekhoni / ekhon / now / right now; "in 10',
-    '  minutes" / "10 min por" is the start time. If no start time is given at all, time is null.',
+    '- Copy the time the boss wrote even if it already passed (the bot handles that); never move it to another time yourself.',
+    '- rumble_royale: "time" is the HOSTING time (the join window opens): "host a rumble at 8 pm", "rumble at 8pm", "now/ekhoni",',
+    '  "in 10 minutes". The GAME START is separate: "play after 30 min (of hosting)" / "start after 4 hours" / "2 ghonta pore" =',
+    '  play_after; "play at 8:30 pm" = play_at; "join window closes 7.35 pm" = join_closes; a bare duration ("10 minute",',
+    '  "5 min", "10 minute dhore") = join_minutes. Fill every one the boss gave, even if they disagree (the bot asks him).',
+    '  If no hosting time is given at all, time is null.',
     '',
     'CONVERSATION RULES',
     '- If there is a PENDING ACTION and the boss changes it ("make it 9 instead", "time ta 9 tay koro", "same but tomorrow",',
@@ -100,7 +107,7 @@ function systemPrompt() {
     '- question_about_bot: 1-3 sentences, helpful and natural, only from ABILITIES below. End with one example order the boss could type.',
     '  If asked for something not supported, say honestly it is not available yet and suggest what you can do.',
     '- small_talk: 1-2 short friendly sentences. clarify: one short specific question.',
-    '- If you mention a time, use only the "HH:MM UTC" form exactly as shown in SCHEDULED TASKS. Never mention any other time zone, city or UTC offset.',
+    '- Never write a clock time, date, time zone, city, "UTC", "GMT" or offset in "reply": the bot adds exact times itself.',
     '',
     'ABILITIES (never claim anything else)',
     abilities,
@@ -108,7 +115,8 @@ function systemPrompt() {
     '- Learning: you learn community facts ONLY from the boss in this channel (teach, edit, forget, list). Staff cannot teach.',
     '  You answer members\' HΛVØCZ questions from knowledge.md + these facts, and keep a list of questions you could not answer.',
     '  You never learn anything from regular members and store nothing about them.',
-    '- Times are shown in UTC. Not available yet: announcements, polls, giveaways, giving points automatically, anything else.',
+    '- Times are shown as Discord timestamps (everyone sees their own local time). Not available yet: announcements, polls,',
+    '  giveaways, giving points automatically (except a Rumble Royale points prize), anything else.',
   ].join('\n');
 }
 
@@ -136,7 +144,7 @@ async function understand(text, speaker, { tasks = [], facts = [], unanswered = 
     `NEW MESSAGE from ${speaker}: ${text.slice(0, 800)}`,
   ].join('\n');
 
-  const raw = await chat(systemPrompt(), user, { json: true, maxTokens: 350, temperature: 0.7 });
+  const raw = await chat(systemPrompt(), user, { json: true, maxTokens: 450, temperature: 0.7 });
   const out = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
   if (!out || !INTENTS.includes(out.intent)) throw new Error(`unexpected intent: ${out && out.intent}`);
   out.task_id = out.task_id === null || out.task_id === undefined ? null : Number(out.task_id) || null;
@@ -144,6 +152,13 @@ async function understand(text, speaker, { tasks = [], facts = [], unanswered = 
   const int = (v) => (v === null || v === undefined || v === '' || !Number.isInteger(Number(v)) ? null : Number(v));
   out.join_minutes = int(out.join_minutes); // Rumble Royale join window
   out.min_players = int(out.min_players);
+  out.play_after = out.play_after === null || out.play_after === undefined || out.play_after === '' ? null : String(out.play_after);
+  const timeObj = (v) => (v && typeof v === 'object' ? v : null);
+  out.play_at = timeObj(out.play_at);
+  out.join_closes = timeObj(out.join_closes);
+  const strList = (v) => (Array.isArray(v) ? v.filter((x) => x !== null && x !== undefined && x !== '').map(String).slice(0, 10) : []);
+  out.remind_before = strList(out.remind_before);
+  out.unknown_parts = strList(out.unknown_parts);
   out.fact = typeof out.fact === 'string' ? out.fact : '';
   out.resolves = Array.isArray(out.resolves) ? out.resolves.map(Number).filter(Number.isInteger) : [];
   out.reply = typeof out.reply === 'string' ? out.reply : '';

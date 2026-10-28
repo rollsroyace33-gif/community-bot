@@ -76,13 +76,17 @@ module.exports = {
     defaultJoinMinutes: num(process.env.RUMBLE_DEFAULT_JOIN_MINUTES, 5),
     maxPointsPrize: num(process.env.RUMBLE_MAX_POINTS_PRIZE, 100000), // above this, a second confirm is needed
     preAnnounceMinutes: num(process.env.RUMBLE_PRE_ANNOUNCE_MINUTES, 5), // heads-up before a scheduled start
+    maxJoinMinutes: num(process.env.RUMBLE_MAX_JOIN_MINUTES, 1440), // longest join window (24 h)
+    remindBeforeSeconds: num(process.env.RUMBLE_REMIND_BEFORE_SECONDS, 120), // role-ping reminder before the start
+    finalPingSeconds: num(process.env.RUMBLE_FINAL_PING_SECONDS, 10), // last role ping before the start
   },
 
   adminRoleId: process.env.ADMIN_ROLE_ID || '',
   verifiedRoleId: process.env.VERIFIED_ROLE_ID || '',
 
   timezone: process.env.TIMEZONE || 'Asia/Dhaka',
-  // zone the boss writes times in (control channel orders). Only used to READ orders; Vexo shows UTC.
+  // zone the boss writes times in (control channel orders). Only used to READ orders; Vexo shows
+  // Discord timestamps (every viewer sees their own local time), never a zone name.
   bossTimezone: (process.env.BOSS_TIMEZONE || 'Asia/Dhaka').trim(),
   dailyCron: process.env.DAILY_CRON || '55 23 * * *',
 

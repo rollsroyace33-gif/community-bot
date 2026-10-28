@@ -1,7 +1,8 @@
 // Time helpers for tasks.
 //  - The boss writes times in his own zone (BOSS_TIMEZONE). It is used ONLY to read his orders.
 //  - Everything is stored in UTC (Supabase timestamptz).
-//  - Everything shown to people is UTC, 24h: "14:30 UTC (in 12 minutes)". The local zone name is never shown.
+//  - Everything shown to people is a Discord timestamp ("<t:UNIX:t> (<t:UNIX:R>)"): every viewer sees it in
+//    their own local time. No zone name, "UTC", "GMT" or offset is ever written in a message.
 const config = require('../config');
 
 // Validate BOSS_TIMEZONE once; a typo falls back to the default instead of crashing
@@ -15,30 +16,32 @@ const BOSS_TZ = (() => {
   }
 })();
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// ---------------- shown to people: Discord timestamps only ----------------
+const unix = (d) => Math.floor(new Date(d).getTime() / 1000);
+// <t:UNIX:t> = "4:35 PM" in each viewer's own zone; <t:UNIX:R> = "in 5 minutes"
+const ts = (d, f) => `<t:${unix(d)}:${f}>`;
 
-// "in 12 minutes", "in 3 hours 20 min", "in 2 days", "5 minutes ago", "now"
-function fromNow(date) {
-  const mins = Math.round((new Date(date).getTime() - Date.now()) / 60000);
-  const abs = Math.abs(mins);
-  if (abs < 1) return 'now';
-  let s;
-  if (abs < 60) s = `${abs} minute${abs === 1 ? '' : 's'}`;
-  else if (abs < 48 * 60) {
-    const h = Math.floor(abs / 60);
-    const m = abs % 60;
-    s = `${h} hour${h === 1 ? '' : 's'}${m && h < 6 ? ` ${m} min` : ''}`;
-  } else s = `${Math.round(abs / 1440)} days`;
-  return mins > 0 ? `in ${s}` : `${s} ago`;
+// "<t:..:t> (<t:..:R>)"; another day on the boss's clock shows the date too ("<t:..:f>")
+function when(date) {
+  const d = new Date(date);
+  const sameDay = localDay(d.getTime()).key === localDay(Date.now()).key;
+  return `${ts(d, sameDay ? 't' : 'f')} (${ts(d, 'R')})`;
 }
 
-// "14:30 UTC (in 12 minutes)"; another UTC day adds the date: "29 Oct, 14:30 UTC (in 2 days)"
-function fmtUtc(date, { relative = true } = {}) {
-  const d = new Date(date);
-  const iso = d.toISOString();
-  const sameDay = iso.slice(0, 10) === new Date().toISOString().slice(0, 10);
-  const day = sameDay ? '' : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}, `;
-  return `${day}${iso.slice(11, 16)} UTC${relative ? ` (${fromNow(d)})` : ''}`;
+// minutes -> "30 min", "1 hour", "4 hours", "1 hour 30 min", "24 hours"
+function fmtDuration(minutes) {
+  const total = Math.round(Number(minutes) || 0);
+  if (total < 60) return `${total} min`;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return `${h} hour${h === 1 ? '' : 's'}${m ? ` ${m} min` : ''}`;
+}
+// seconds -> "10 s", "2 min", "1 min 30 s" (ping lists)
+function fmtSeconds(seconds) {
+  const s = Math.round(Number(seconds) || 0);
+  if (s < 60) return `${s} s`;
+  if (s % 60 === 0) return fmtDuration(s / 60);
+  return `${Math.floor(s / 60)} min ${s % 60} s`;
 }
 
 // Offset of `zone` at `date` in ms. zone: IANA name, "UTC"/"GMT", or "+05:30" / "UTC-4"
@@ -80,11 +83,27 @@ function bossLocal(date) {
   return `${local.toISOString().slice(0, 16).replace('T', ' ')} (${weekday})`;
 }
 
-// "2026-10-27 15:15 (Tuesday)" in UTC, for the AI prompt
-function utcStamp(date) {
-  const d = new Date(date);
-  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'long' }).format(d);
-  return `${d.toISOString().slice(0, 16).replace('T', ' ')} (${weekday})`;
+// The boss's calendar day for an instant: { y, m, d, h, min, key: "2026-10-28" }
+function localDay(ms, zone = BOSS_TZ) {
+  const local = new Date(ms + zoneOffsetMs(zone, new Date(ms)));
+  return {
+    y: local.getUTCFullYear(), m: local.getUTCMonth() + 1, d: local.getUTCDate(),
+    h: local.getUTCHours(), min: local.getUTCMinutes(), key: local.toISOString().slice(0, 10),
+  };
+}
+
+// The boss's wall clock (day + n days, hh:mm) -> UTC Date. zone: BOSS_TIMEZONE unless he named one.
+function wallAt(day, plusDays, h, min, zone = BOSS_TZ) {
+  const base = new Date(Date.UTC(day.y, day.m - 1, day.d + plusDays));
+  const p2 = (n) => String(n).padStart(2, '0');
+  return wallToUtc(`${base.toISOString().slice(0, 10)}T${p2(h)}:${p2(min)}`, zone);
+}
+
+// "YYYY-MM-DDTHH:mm" on the boss's clock, for drafts the AI may copy later
+function bossWall(date) {
+  const d = localDay(new Date(date).getTime());
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${d.key}T${p2(d.h)}:${p2(d.min)}`;
 }
 
 // Time object from the AI -> UTC Date, or null.
@@ -100,10 +119,13 @@ function resolveTime(t) {
   return null;
 }
 
-// Strip the boss's zone name / city from any text shown to people (belt and braces)
+// Strip the boss's zone name / city and any "UTC" / "GMT" / "GMT+6" from text shown to people (belt and
+// braces: the code itself only writes Discord timestamps)
 function hideLocalZone(text) {
   const parts = [BOSS_TZ, BOSS_TZ.split('/').pop().replace(/_/g, ' ')];
-  return parts.reduce((s, p) => s.replace(new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ''), text);
+  return parts
+    .reduce((s, p) => s.replace(new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ''), text)
+    .replace(/\s?\(?\b(?:UTC|GMT)(?:\s?[+-]\d{1,2}(?::?\d{2})?)?\b\)?/g, '');
 }
 
 // "06:00" -> 360 minutes after midnight; null if not a valid 24-hour HH:MM
@@ -126,4 +148,7 @@ function isBossOffline(now = Date.now(), { start = config.bossOfflineStart, end 
   return s < e ? m >= s && m < e : m >= s || m < e;
 }
 
-module.exports = { fmtUtc, fromNow, bossLocal, utcStamp, resolveTime, hideLocalZone, isBossOffline, parseHHMM };
+module.exports = {
+  ts, unix, when, fmtDuration, fmtSeconds, bossLocal, bossWall, localDay, wallAt, wallToUtc, resolveTime,
+  hideLocalZone, isBossOffline, parseHHMM, BOSS_TZ,
+};
