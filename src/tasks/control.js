@@ -241,6 +241,8 @@ async function scheduleOrder(message, ai, active) {
       : `prize: **${params.prize}** (claim via ticket)`;
   const big = handler.isBigPrize ? handler.isBigPrize(params) : false;
   if (big) note += `\n⚠️ **That is more than ${config.rumble.maxPointsPrize} points.** Double-check it, this needs a second confirm.`;
+  const typo = handler.prizeTypoWarning ? handler.prizeTypoWarning(params) : null; // "20 pints": warned, never guessed
+  if (typo) note += `\n${typo}`;
   const summary = `${lead}${handler.label} at **${when(time.date)}** in <#${channelId}>, numbers ${lo}-${hi}, ${prize}.${note}\nConfirm? (yes/no)`;
   const describe =
     `schedule ${handler.type} at boss clock ${bossLocal(time.date)}, ` +

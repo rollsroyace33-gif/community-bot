@@ -54,6 +54,13 @@ const awardQuality = (userId, day, amount) =>
 const adjustPoints = (userId, amount, reason) =>
   rpc('adjust_points', { p_user: userId, p_amount: amount, p_reason: reason });
 
+// users.points (the balance the shop and /points show), null = no user row yet. Used to verify prize payouts.
+async function getBalance(userId) {
+  const { data, error } = await supabase.from('users').select('points').eq('user_id', String(userId)).maybeSingle();
+  if (error) throw new Error(`balance read: ${error.message}`);
+  return data ? Number(data.points) : null;
+}
+
 module.exports = {
   today,
   daysAgo,
@@ -62,4 +69,5 @@ module.exports = {
   recordReaction,
   awardQuality,
   adjustPoints,
+  getBalance,
 };

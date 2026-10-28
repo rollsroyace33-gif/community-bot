@@ -33,8 +33,8 @@ const { report } = require('./report');
 const { when, fmtDuration, fmtSeconds, bossLocal, bossWall, resolveTime } = require('./time');
 const orderTime = require('./orderTime');
 const identity = require('../identity');
-const supabase = require('../db');
-const points = require('../points');
+// the ONE prize classifier + points payout, shared with the number guess game
+const { classifyPrize, resolvePrize, prizeTypoWarning, payout } = require('./prize');
 const T = require('./rumbleTemplates');
 const { getTextChannel } = require('../utils');
 
@@ -100,22 +100,7 @@ function draw(game, name) {
 }
 
 // ---------------------------------------------------------------- prize + duration (shared, deterministic)
-// "100 points" -> points; any other text ("1 SOL", "NFT", "$50", "WL") -> ticket (manual delivery); empty -> none
-function classifyPrize(raw) {
-  const prize = String(raw ?? '')
-    .replace(/@(everyone|here)/gi, '')
-    .replace(/<[@#][!&]?\d+>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 100);
-  if (!prize) return { prize: null, prize_type: 'none', prize_points: null };
-  const m = /^(\d[\d,_]*)\s*(points?|pts?)$/i.exec(prize);
-  if (m) {
-    const n = Number(m[1].replace(/[,_]/g, ''));
-    if (Number.isSafeInteger(n) && n > 0) return { prize, prize_type: 'points', prize_points: n };
-  }
-  return { prize, prize_type: 'ticket', prize_points: null };
-}
+// classifyPrize ("100 points" -> points, other text -> ticket, empty -> none) lives in prize.js, shared with number guess
 
 // Join window length from the boss's own words: "10 minute", "5 min", "10 minute dhore", "2 hours".
 // "in 10 minutes" / "10 min por" mean the HOSTING time, so they are skipped. null = not stated.
@@ -212,6 +197,8 @@ function summary(params, runAt) {
   ];
   for (const s of plan.skipped) lines.push(`⚠️ "Remind ${fmtSeconds(s)} before" does not fit in this join window, so that reminder is skipped.`);
   if (isBigPrize(params)) lines.push(`⚠️ **That is more than ${R().maxPointsPrize} points.** Double-check it, this needs a second confirm.`);
+  const typo = prizeTypoWarning(params); // "20 pints": warned, never guessed
+  if (typo) lines.push(typo);
   return lines.join('\n');
 }
 
@@ -964,36 +951,7 @@ function cardEmbed(card) {
 }
 
 // ---------------------------------------------------------------- winner + payout
-const payoutReason = (taskId) => `rumble_royale_prize task #${taskId}`;
-const paying = new Set();
-
-// Credit the points prize. Idempotent: state.paid, plus the point_log entry (covers a crash between
-// the credit and saving the flag), plus an in-process lock against a double call at the same moment.
-// ctx: { taskId, state, winnerId, amount, reason? }   ->   { ok, balance } / { ok: false, error }
-// reason: point_log reason for other games (number guess); default = the Rumble one
-async function payout(ctx, deps = {}) {
-  const pts = deps.points || points;
-  const db = deps.db || supabase;
-  const { taskId, state, winnerId, amount } = ctx;
-  if (state.paid) return { ok: true, already: true, balance: state.paid.balance };
-  if (paying.has(taskId)) return { ok: false, busy: true, error: 'payout already in progress' };
-  paying.add(taskId);
-  try {
-    const reason = ctx.reason || payoutReason(taskId);
-    const { data, error } = await db.from('point_log').select('id').eq('reason', reason).limit(1);
-    if (error) throw new Error(`point_log check: ${error.message}`);
-    const alreadyLogged = !!(data && data.length);
-    const balance = alreadyLogged ? null : await pts.adjustPoints(String(winnerId), amount, reason); // atomic RPC, creates the user row
-    state.paid = { at: new Date().toISOString(), winnerId: String(winnerId), amount, balance, payoutId: reason };
-    await store.update(taskId, { state }).catch((err) => console.error(`rumble #${taskId} paid flag save:`, err.message));
-    return { ok: true, balance, already: alreadyLogged };
-  } catch (err) {
-    console.error(`rumble #${taskId} payout failed:`, err.message);
-    return { ok: false, error: err.message };
-  } finally {
-    paying.delete(taskId);
-  }
-}
+// the points payout is prize.js payout() (shared with number guess): verified credit, logged, never twice
 
 const ticketHint = () => (config.channels.ticket ? ` Ticket channel: <#${config.channels.ticket}>` : '');
 
@@ -1045,11 +1003,11 @@ function runnersEmbed(game, runners) {
 // The points payout runs FIRST, so the congrats only says "sent" after the credit succeeded.
 async function announceWinner(game, w) {
   const mention = `<@${w.id}>`;
-  const p = game.params;
+  const p = (game.params = resolvePrize(game.params)); // a task saved without prize_type / prize_points: re-derived
   let pay = null;
   let prizePart;
   if (p.prize_type === 'points') {
-    pay = await payout({ taskId: game.taskId, state: game.state, winnerId: w.id, amount: p.prize_points });
+    pay = await payout({ taskId: game.taskId, game: type, state: game.state, winnerId: w.id, amount: p.prize_points });
     prizePart = pay.ok
       ? fill(draw(game, 'winnerPoints'), { winner: mention, points: p.prize_points })
       : `${fill(draw(game, 'winnerTicket'), { winner: mention, prize: `${p.prize_points} points` })}${ticketHint()}\nThe automatic payout hit a snag, so the team will deliver it by hand.`;
@@ -1115,8 +1073,8 @@ async function endGame(game, reason, pay = null) {
     if (p.prize_type === 'points') {
       paid = pay?.ok
         ? `Points credited: **yes**${pay.balance !== null && pay.balance !== undefined ? ` (new balance: ${pay.balance})` : ' (already in point_log)'}`
-        : `Points credited: **NO**, payout failed (${pay?.error || 'unknown error'}). Please add **${p.prize_points} points** to user ID \`${w.id}\` by hand (/addpoints). The winner was told to open a ticket.`;
-    } else if (p.prize_type === 'ticket') paid = `Deliver **${p.prize}** when they open a ticket.`;
+        : `Points credited: **NO**, Payout FAILED (${pay?.error || 'unknown error'}). Please add **${p.prize_points} points** to user ID \`${w.id}\` by hand (/addpoints). The winner was told to open a ticket.`;
+    } else if (p.prize_type === 'ticket') paid = `Ticket prize: deliver **${p.prize}** when they open a ticket.`;
     const runners = (game.state.runnersUp || []).map((r) => `${r.place}. ${safeName(r.name)} (\`${r.id}\`, ${r.kills} kills)`).join(' · ');
     await report(
       game.client,
@@ -1169,9 +1127,13 @@ async function resume(task, client) {
     const w = game.players.get(s.winner.id) || { ...s.winner };
     let pay = null;
     if (!s.winnerAnnounced) pay = await announceWinner(game, w);
-    else if (game.params.prize_type === 'points' && !s.paid) pay = await payout({ taskId: task.id, state: game.state, winnerId: w.id, amount: game.params.prize_points });
+    else {
+      const p = (game.params = resolvePrize(game.params));
+      if (p.prize_type === 'points' && !s.paid) pay = await payout({ taskId: task.id, game: type, state: game.state, winnerId: w.id, amount: p.prize_points });
+    }
     await store.update(task.id, { state: game.state }).catch(() => {});
-    return report(client, `⚠️ I restarted right after Rumble #${task.id} picked its winner (${safeName(w.name)}, ID \`${w.id}\`). Finished it${pay ? (pay.ok ? ', prize points credited' : `, payout FAILED: ${pay.error}`) : ''}. AI calls during game: 0`);
+    const amt = game.params.prize_points;
+    return report(client, `⚠️ I restarted right after Rumble #${task.id} picked its winner (${safeName(w.name)}, ID \`${w.id}\`). Finished it${pay ? (pay.ok ? `, prize points credited${typeof pay.balance === 'number' ? ` (new balance: ${pay.balance})` : ''}` : `, Payout FAILED for ID \`${w.id}\`, amount ${amt} points: ${pay.error}`) : ''}. AI calls during game: 0`);
   }
   await safePost(game, draw(game, 'crashEnded'));
   return report(client, `⚠️ I restarted in the middle of Rumble #${task.id}'s rounds, so I ended it safely: no winner, no payout. Order a new one for a rematch.`);

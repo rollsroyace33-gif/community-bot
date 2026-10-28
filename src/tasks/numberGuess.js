@@ -24,8 +24,8 @@ const store = require('./store');
 const { report } = require('./report');
 const { ts, when } = require('./time');
 const { getTextChannel } = require('../utils');
-// shared with Rumble Royale: the prize classifier and the safe, idempotent points payout
-const { classifyPrize, payout } = require('./rumbleRoyale');
+// shared with Rumble Royale: the prize classifier and the safe, idempotent, verified points payout
+const { classifyPrize, resolvePrize, prizeTypoWarning, payout } = require('./prize');
 
 const type = 'number_guess';
 const label = 'Number guess game';
@@ -125,8 +125,8 @@ const fields = '"prize" (short text like "50 points", or null), "range" ([min,ma
 // a points prize above RUMBLE_MAX_POINTS_PRIZE needs a second confirm (typo guard, same limit as Rumble)
 const isBigPrize = (params) => params.prize_type === 'points' && params.prize_points > config.rumble.maxPointsPrize;
 
-// params saved before prize_type existed: classified the same way
-const prizeInfo = (params = {}) => (params.prize_type ? params : { ...params, ...classifyPrize(params.prize) });
+// params saved before prize_type / prize_points existed: re-derived with the same classifier
+const prizeInfo = resolvePrize;
 
 function buildParams(p) {
   let range = DEFAULT_RANGE;
@@ -265,13 +265,13 @@ async function endGame(game, client, reason) {
 
   const players = game.guesses.size;
   const w = game.winner;
-  const prizeParams = game.params || prizeInfo({ prize: game.prize });
+  const prizeParams = prizeInfo(game.params || { prize: game.prize }); // re-checked at payout time
   const isPoints = reason === 'winner' && prizeParams.prize_type === 'points';
   // points prize: credited BEFORE the announcement, through the Rumble payout (point_log + "paid" flag = never twice)
   let pay = null;
   if (isPoints) {
     game.state = { ...game.state, secret: game.secret, winner: { id: w.id, tag: w.tag, guesses: w.guesses } };
-    pay = await payout({ taskId: game.taskId, state: game.state, winnerId: w.id, amount: prizeParams.prize_points, reason: `number_guess_prize task #${game.taskId}` });
+    pay = await payout({ taskId: game.taskId, game: type, state: game.state, winnerId: w.id, amount: prizeParams.prize_points });
   }
   try {
     if (reason === 'winner') {
@@ -491,6 +491,7 @@ module.exports = {
   fields,
   buildParams,
   isBigPrize,
+  prizeTypoWarning,
   describe,
   tick,
   cancel,

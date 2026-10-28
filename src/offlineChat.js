@@ -26,6 +26,7 @@ const quietMs = () => config.offline.quietMinutes * 60 * 1000;
 
 // a channel where casual chat with a lone member is OK
 function isChatChannel(message) {
+  if (config.xDrop.channelId && message.channelId === config.xDrop.channelId) return false; // never chat in the X drop channel
   if (config.chatChannelIds.length) return config.chatChannelIds.includes(message.channelId);
   const ch = message.channel;
   if (!ch || ch.type !== ChannelType.GuildText) return false; // announcement channels, threads, voice: no

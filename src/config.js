@@ -91,10 +91,10 @@ module.exports = {
   dailyCron: process.env.DAILY_CRON || '55 23 * * *',
 
   points: {
-    dailyCap: num(process.env.DAILY_CAP, 10),
-    messageCap: num(process.env.MESSAGE_CAP, 5),
-    reactionCap: num(process.env.REACTION_CAP, 2),
-    qualityCap: num(process.env.QUALITY_CAP, 3),
+    dailyCap: num(process.env.DAILY_CAP, 20), // Discord activity points per member per day (X drops are extra)
+    messageCap: num(process.env.MESSAGE_CAP, 10),
+    reactionCap: num(process.env.REACTION_CAP, 4),
+    qualityCap: num(process.env.QUALITY_CAP, 6),
     topBonus: num(process.env.TOP_BONUS, 5), // given OUTSIDE the daily cap
     messagesPerPoint: num(process.env.MESSAGES_PER_POINT, 2),
     qualityScorePerPoint: num(process.env.QUALITY_SCORE_PER_POINT, 3),
@@ -110,6 +110,13 @@ module.exports = {
   },
 
   qa: { perHour: num(process.env.QA_PER_HOUR, 10) },
+
+  // X post drop reward (src/xDrop.js). Empty channel = feature off. Points are extra (outside the daily cap)
+  xDrop: {
+    channelId: (process.env.X_DROP_CHANNEL_ID || '').trim(),
+    points: num(process.env.X_DROP_POINTS, 10),
+    maxPerDay: num(process.env.X_DROP_MAX_PER_DAY, 5), // credited drops per member per day, 0 = unlimited
+  },
 
   marketplace: {
     autoRemoveSoldOut: (process.env.AUTO_REMOVE_SOLD_OUT || 'false').toLowerCase() === 'true',

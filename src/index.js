@@ -39,6 +39,7 @@ client.once(Events.ClientReady, (c) => {
   startScheduler(client);
   startTaskScheduler(client); // control channel tasks (number guess game); warns if CONTROL_CHANNEL_ID is empty
   require('./tasks/rumbleRoyale').startupCheck(client); // one line about RUMBLE_CHANNEL_ID + permission warnings
+  require('./xDrop').startupCheck(); // one warning when X_DROP_CHANNEL_ID is empty (feature off)
   require('./bossPresence').load(); // the boss's last message time (welcome back survives restarts)
   // shop channel: one header (edited in place), old per-item cards removed (bot-posted only)
   if (config.channels.marketplace) {

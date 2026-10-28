@@ -14,6 +14,8 @@
 //   6. channel activity -> offline chat steps back when another human writes (memory only)
 //   7. chat context     -> remember the message for later replies (memory only)
 //   8. points           -> as before (also in game channels)
+//   X drop (first)      -> in X_DROP_CHANNEL_ID, a valid X post link = instant extra points + one reply (xDrop.js),
+//                          for every member incl. the boss (not gated). A drop message gets no other reply.
 const config = require('../config');
 const points = require('../points');
 const tasks = require('../tasks');
@@ -24,6 +26,7 @@ const bossPresence = require('../bossPresence');
 const offlineChat = require('../offlineChat');
 const bossGate = require('../bossGate');
 const supabase = require('../db');
+const xDrop = require('../xDrop');
 
 const lastMsgTime = new Map(); // userId -> timestamp
 const recentMsgs = new Map(); // userId -> last few normalized messages
@@ -79,6 +82,9 @@ module.exports = async function onMessageCreate(message) {
   try {
     if (message.author.bot || !message.guild) return;
 
+    // X post drop: before the boss gate, so it works the same for everyone (never throws)
+    const isDrop = await xDrop.handle(message);
+
     // 1b. the boss gate: true for every member; for the boss only when he talks to Vexo
     //     (the control channel has its own order flow below and is not gated)
     const isBoss = identity.isBoss(message.author);
@@ -105,7 +111,9 @@ module.exports = async function onMessageCreate(message) {
 
     // 5. everything else that can make Vexo talk; never throws, so points below always run
     let isAsk = !!config.channels.ask && message.channelId === config.channels.ask;
-    if (!gameOwned && mayReply) ({ isAsk } = await replies.respond(message, { awayMs }));
+    if (isDrop) {
+      // an X drop: the confirmation line was its only reply (no cover / chat / welcome on it)
+    } else if (!gameOwned && mayReply) ({ isAsk } = await replies.respond(message, { awayMs }));
     // the boss is not talking to Vexo: every reply handler is skipped, except the one funny welcome-back
     // after a long break (BOSS_AWAY_HOURS), and even that never on a reply to / mention of someone else
     else if (!gameOwned) await replies.welcomeBack(message, { awayMs, addressed: false });
