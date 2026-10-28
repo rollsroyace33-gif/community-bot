@@ -1,11 +1,16 @@
 // Every message goes through here, in this order:
 //   1. ignore bots / DMs
+//   1b. boss gate       -> a boss message NOT addressed to Vexo gets no reply from any handler below
+//                          (bossGate.js: @Vexo, a reply to Vexo, or "vexo, ..." only). Bookkeeping still runs.
 //   2. boss presence    -> if the boss wrote: remember WHEN (before anything is sent). No reply here.
 //   3. game channels    -> a running game owns its channel (guesses, game chat); nothing else talks there
-//   4. control channel  -> boss/staff orders only, nothing else runs there
+//                          (gated boss message: his guesses count, but no banter / flavor line)
+//   4. control channel  -> boss/staff orders only, nothing else runs there (not affected by the gate)
 //   5. replies.respond  -> boss cover (section 5) -> members: greeting, HΛVØCZ questions / addressed chat
 //                          (section 4) -> the boss: welcome back + replies only when he talks to Vexo
 //                          (sections 1, 2) -> offline chat with a lone member (section 3)
+//                          Gated boss message: only the one welcome-back line after a long break,
+//                          and never when he is replying to / mentioning someone else.
 //   6. channel activity -> offline chat steps back when another human writes (memory only)
 //   7. chat context     -> remember the message for later replies (memory only)
 //   8. points           -> as before (also in game channels)
@@ -17,6 +22,7 @@ const chatContext = require('../chatContext');
 const identity = require('../identity');
 const bossPresence = require('../bossPresence');
 const offlineChat = require('../offlineChat');
+const bossGate = require('../bossGate');
 const supabase = require('../db');
 
 const lastMsgTime = new Map(); // userId -> timestamp
@@ -73,16 +79,23 @@ module.exports = async function onMessageCreate(message) {
   try {
     if (message.author.bot || !message.guild) return;
 
-    // 2. the boss's last message time, updated BEFORE any reply (never welcomed twice for one return)
+    // 1b. the boss gate: true for every member; for the boss only when he talks to Vexo
+    //     (the control channel has its own order flow below and is not gated)
+    const isBoss = identity.isBoss(message.author);
+    const isControl = !!config.channels.control && message.channelId === config.channels.control;
+    const mayReply = isBoss && !isControl ? await bossGate.shouldVexoHandleBossMessage(message, message.client) : true;
+
+    // 2. the boss's last message time, updated BEFORE any reply, for EVERY boss message (also ignored
+    //    ones), so one return is never welcomed twice
     let awayMs = null;
-    if (identity.isBoss(message.author)) {
-      awayMs = bossPresence.note({ isControl: !!config.channels.control && message.channelId === config.channels.control });
+    if (isBoss) {
+      awayMs = bossPresence.note({ isControl });
     }
 
     // 3. a running game owns its channel: no welcome, cover, Q&A or chat there (points still count)
     let gameOwned = false;
     try {
-      gameOwned = await tasks.handleMessage(message);
+      gameOwned = await tasks.handleMessage(message, { mayReply }); // gated boss: counted, no banter
     } catch (err) {
       console.error('game chat:', err.message);
     }
@@ -92,7 +105,10 @@ module.exports = async function onMessageCreate(message) {
 
     // 5. everything else that can make Vexo talk; never throws, so points below always run
     let isAsk = !!config.channels.ask && message.channelId === config.channels.ask;
-    if (!gameOwned) ({ isAsk } = await replies.respond(message, { awayMs }));
+    if (!gameOwned && mayReply) ({ isAsk } = await replies.respond(message, { awayMs }));
+    // the boss is not talking to Vexo: every reply handler is skipped, except the one funny welcome-back
+    // after a long break (BOSS_AWAY_HOURS), and even that never on a reply to / mention of someone else
+    else if (!gameOwned) await replies.welcomeBack(message, { awayMs, addressed: false });
 
     // 6. offline chat: a second human in the channel ends Vexo's chat with the first
     offlineChat.noteHuman(message);

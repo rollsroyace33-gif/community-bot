@@ -348,14 +348,16 @@ async function reschedule(task, date, { client, quiet = false }) {
 
 // ---------------------------------------------------------------- live game chat
 // Returns true when a game is running in this channel (the game then owns the channel).
-async function handleMessage(message) {
+// mayReply: false = the boss is not talking to Vexo (bossGate.js): no banter and no flavor line on his
+// wrong guesses. His guesses still count, a win still ends the game, rule notices are still sent.
+async function handleMessage(message, { mayReply = true } = {}) {
   const game = games.get(message.channelId);
   if (!game || game.ended) return false;
 
   // a guess is a message that is just a number: "42", "42!", "#42"
   const m = /^#?\s*(-?\d{1,9})\s*[!?.]*$/.exec(message.content.trim());
   if (!m) {
-    await maybeBanter(message, game);
+    if (mayReply) await maybeBanter(message, game);
     return true;
   }
 
@@ -394,7 +396,7 @@ async function handleMessage(message) {
   // wrong guess: the secret is NOT used below this line, so nothing here can leak it
   const repeated = game.lastGuessValue.get(uid) === n;
   game.lastGuessValue.set(uid, n);
-  const line = guessReaction(game, uid, { repeated });
+  const line = mayReply ? guessReaction(game, uid, { repeated }) : null;
   if (line) await reply(message, line);
   return true;
 }

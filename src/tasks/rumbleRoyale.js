@@ -929,11 +929,12 @@ async function reschedule(task, date, { client, quiet = false }) {
 // ---------------------------------------------------------------- chat in the game channel
 // The game owns its channel: Q&A / personality stay out. ~1 in 5 messages get a template one-liner
 // (channel cooldown, never the same person twice in a row, never a question, no AI).
-async function handleMessage(message) {
+// mayReply: false = the boss is not talking to Vexo (bossGate.js): no one-liner for that message.
+async function handleMessage(message, { mayReply = true } = {}) {
   const game = games.get(message.channelId);
   if (!game || game.ended) return false;
   const now = Date.now();
-  if (now - game.lastChatAt >= CHAT_GAP_MS && game.lastChatTo !== message.author.id && Math.random() < CHAT_CHANCE) {
+  if (mayReply && now - game.lastChatAt >= CHAT_GAP_MS && game.lastChatTo !== message.author.id && Math.random() < CHAT_CHANCE) {
     game.lastChatAt = now;
     game.lastChatTo = message.author.id;
     await message.reply({ content: draw(game, 'chatReply'), allowedMentions: { repliedUser: false, parse: [] } }).catch((err) => console.error('rumble chat reply:', err.message));

@@ -6,6 +6,7 @@
 //   b. members         -> "gm"/"gn" greeting, then HΛVØCZ questions + chat when Vexo is addressed
 //                         (mention, reply to Vexo, "vexo" by name) or in #ask
 //   c. the boss        -> welcome back after a long break; otherwise a reply ONLY when he talks to Vexo
+//                         (messageCreate.js only calls respond() for him when bossGate.js allows it)
 //   d. offline chat    -> a lone member in a quiet channel during the boss's offline window (offlineChat.js)
 // (b and c never overlap: they are split by author.)
 // Everything catches its own errors: a failed reply never stops points or other handlers.
@@ -17,6 +18,7 @@ const clock = require('./clock');
 const chatContext = require('./chatContext');
 const bossCover = require('./bossCover');
 const offlineChat = require('./offlineChat');
+const bossGate = require('./bossGate');
 const T = require('./bossTemplates');
 const { createBag } = require('./bag');
 const { allowQa } = require('./ratelimit');
@@ -38,20 +40,6 @@ function addressed(message) {
   const repliedToVexo = message.mentions?.repliedUser?.id === botId;
   const byName = /\bvexo\b/i.test(message.content || '');
   return { mentioned, repliedToVexo, byName, any: mentioned || repliedToVexo || byName };
-}
-
-// The boss "talks to Vexo" by name only when it is a direct address: "vexo, ...", "hey vexo ...",
-// "vexo what's up", "..., vexo" or "vexo?". "lol vexo is wild" said to others is not.
-function bossCallsVexo(text) {
-  const t = String(text || '');
-  // "vexo is / was / has ..." talks ABOUT Vexo (to others), not to it
-  if (/^\s*vexo('s|\s+(is|was|has|had|seems|looks|and|did|does|will|can|could|would|just|really|kinda|tbh))\b/i.test(t)) return false;
-  return (
-    /^\s*(hey|hi|yo|oi|ok|okay|oye|ey|so|and|bro)?[\s,]*vexo\b/i.test(t) ||
-    /\bvexo\s*[,:]/i.test(t) ||
-    /,\s*vexo[\s.!?]*$/i.test(t) ||
-    /\bvexo\s*\?\s*$/i.test(t)
-  );
 }
 
 // "ok", "lol", "let's see", pure emoji: a closing remark gets silence or at most a reaction
@@ -171,30 +159,39 @@ function welcomeLine(awayMs) {
   return draw('welcomeHours', T.welcomeHours).replace('{hours}', String(Math.max(1, hours)));
 }
 
-async function bossMessage(message, { isAsk, addr, awayMs }) {
-  // 2. welcome back: ONE line for the first message after a long break, then the normal rules
-  if (awayMs !== null && awayMs !== undefined && awayMs >= config.bossAwayHours * 3600000) {
-    await message.reply({ content: welcomeLine(awayMs), allowedMentions: { repliedUser: false, parse: [] } }).catch((err) => console.error('welcome back:', err.message));
-    return;
-  }
+// 2. welcome back: ONE line for the first message after a long break (BOSS_AWAY_HOURS). addressed =
+// he talks to Vexo (bossGate.js); otherwise the line is still allowed, but never while he is replying
+// to / mentioning another member. true = the line was sent.
+async function welcomeBack(message, { awayMs, addressed }) {
+  if (awayMs === null || awayMs === undefined || awayMs < config.bossAwayHours * 3600000) return false;
+  if (!addressed && (await bossGate.bossTalksToOthers(message, message.client))) return false;
+  await message.reply({ content: welcomeLine(awayMs), allowedMentions: { repliedUser: false, parse: [] } }).catch((err) => console.error('welcome back:', err.message));
+  return true;
+}
 
-  // 1. only when he is actually talking to Vexo
-  const byName = bossCallsVexo(message.content);
-  if (!addr.mentioned && !addr.repliedToVexo && !byName && !isAsk) return; // chat with others, remarks, emojis: no reply
+async function bossMessage(message, { isAsk, addr, awayMs }) {
+  if (await welcomeBack(message, { awayMs, addressed: true })) return; // then the normal rules
+
+  // 1. only when he is actually talking to Vexo. messageCreate.js already checked this (bossGate.js);
+  // checked again so no path can answer him otherwise. (The old "#ask channel = always answer the
+  // boss" rule is gone: #ask is the same channel as #open-floor, so he got a reply to everything.)
+  const via = await bossGate.addressedVia(message, message.client); // 'mention' | 'reply' | 'name' | null
+  if (!via) return;
 
   const text = message.content.replace(new RegExp(`<@!?${message.client.user.id}>`, 'g'), '').trim();
   if (isClosingRemark(text)) {
-    if (addr.mentioned || addr.repliedToVexo || byName) await message.react(draw('reaction', T.bossReactions)).catch(() => {});
+    await message.react(draw('reaction', T.bossReactions)).catch(() => {});
     return; // "ok", "lol", pure emoji: a reaction at most, never a text reply
   }
 
   const now = clock.now();
   const st = bossState.get(message.channelId) || { lastReplyAt: 0, inARow: 0 };
-  const explicit = addr.mentioned || addr.repliedToVexo;
+  const explicit = via === 'mention' || via === 'reply';
   if (!explicit && now - st.lastReplyAt < BOSS_COOLDOWN_MS) return; // per-channel cooldown
   if (!explicit && st.inARow >= MAX_IN_A_ROW) return; // at most 2 in a row unless he mentions / replies
 
-  const replied = await converse(message, { isBoss: true, isAsk, addr });
+  // he is talking to Vexo (checked above), so converse() treats it as addressed in every channel
+  const replied = await converse(message, { isBoss: true, isAsk, addr: { ...addr, any: true } });
   if (replied) bossState.set(message.channelId, { lastReplyAt: now, inARow: st.inARow + 1 });
 }
 
@@ -234,8 +231,8 @@ async function respond(message, { awayMs = null } = {}) {
 
 module.exports = {
   respond,
+  welcomeBack,
   addressed,
-  bossCallsVexo,
   isClosingRemark,
   _test: { reset: () => bossState.clear() },
 };
