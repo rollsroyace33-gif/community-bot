@@ -78,17 +78,16 @@ const BOSS_UNKNOWN_REPLIES = [
   'No clue yet, boss. Drop it in the control channel and I\'ll know it forever.',
 ];
 
-// What the bot itself does (points, marketplace, games), built from config so it is always
-// accurate. Lets Vexo answer "where do we use those points?" without guessing.
+// What the bot itself does (points, marketplace, games), told to the AI. No daily limit, cap,
+// scoring formula or point amount is ever given (members are never told), except the X post drop.
 function serverFeatures() {
-  const p = config.points;
-  const market = config.channels.marketplace ? 'the marketplace channel' : 'the marketplace';
   return [
-    `- Members earn points by chatting (every ${p.messagesPerPoint} valid messages = 1 point), by reacting to others' messages,`,
-    `  and through a nightly AI quality bonus. Max ${p.dailyCap} points per day. The day's best member (by chat quality) gets +${p.topBonus} bonus points.`,
-    `- Points are spent in ${market}: members click Redeem on a prize card. Role prizes are given automatically; other prizes`,
-    '  are delivered by the team through a ticket. /points shows your balance, /leaderboard the top members.',
-    '- Vexo sometimes hosts a Number Guess Game with prizes, announced in advance.',
+    `- Dropping your X post in the HΛVØCZ X channel is credited with ${config.xDrop.points} points instantly (the fastest, biggest way to earn).`,
+    '- Members also earn points by being genuinely active: chatting, helping, being supportive, reacting to others and overall',
+    '  engagement (quality over quantity, spam earns nothing). The most active and supportive members get daily bonus points.',
+    '- Rumble Royale, the Number Guess Game and team giveaways have prizes; winners receive points.',
+    '- Points are redeemed in the Marketplace (shop channel: Purchase, pick a prize, confirm, get a receipt). Prizes that need',
+    '  delivery are claimed through a ticket. The My Points button shows your balance.',
   ].join('\n');
 }
 
@@ -101,47 +100,37 @@ function roadmapStages() {
 }
 
 // ---------- Answer length guard ----------
-// Budget per answer kind: max sentences + max characters ("a few lines", not run-on sentences).
-// FULL = "give me everything": only Discord's 1800-char limit applies.
+// Budget per HΛVØCZ answer kind: max sentences + max characters.
+//   SPECIFIC = a normal answer, BROAD = roadmap / what is HΛVØCZ / how do I earn points,
+//   LORE = the lore, FULL = the member explicitly asked for full details.
 const BUDGET = {
-  BROAD: { sentences: 7, chars: 750 },
-  SPECIFIC: { sentences: 3, chars: 350 },
-  FULL: { sentences: Infinity, chars: 1800 },
+  SPECIFIC: { sentences: 4, chars: 500 },
+  BROAD: { sentences: 5, chars: 700 },
+  LORE: { sentences: 3, chars: 400 },
+  FULL: { sentences: Infinity, chars: 1200 },
 };
+const ANSWER_TOKENS = 220; // the answering call's max_tokens
+const FULL_TOKENS = 320; // only for an explicit "full details" request (about 1200 characters)
 const countSentences = (t) => t.split(/(?<=[.!?…])\s+/).filter((s) => /\w/.test(s)).length;
 const fits = (t, b) => countSentences(t) <= b.sentences && t.length <= b.chars;
 
-// Small models often ignore length rules. If the answer is over budget, ask once for a tighter
-// rewrite that keeps every fact. Never throws: on any problem the original is kept, and a
-// SPECIFIC answer is cut to its first sentences as a last resort.
-async function tighten(answer, budget, isBoss) {
-  if (fits(answer, budget)) return answer;
-  // stage names the original answer mentions: the rewrite must keep every one of them
-  const named = roadmapStages().filter((s) => answer.toLowerCase().includes(s.toLowerCase()));
-  try {
-    const system = [
-      `Rewrite this Discord answer in at most ${budget.sentences} sentences and about ${budget.chars} characters, as one smooth`,
-      'conversational paragraph of short, easy sentences (no long run-on sentences). Keep every stage (by its name, never',
-      '"Phase N - ..."), fact and "not announced yet" note, in the same order. Merge related points: put two or three stages',
-      'in one sentence instead of one sentence per stage. Drop the intro line, filler and hype closers.',
-      'Add NO new facts. Keep the playful tone, plain prose (no lists, headings or bold), English, at most one emoji.',
-      `${isBoss ? 'Keep calling the reader "boss". ' : ''}Reply with the rewritten answer only.`,
-    ].join('\n');
-    // two tries at most. A rewrite that loses a stage is never used; one that is within budget wins
-    // at once; otherwise the shortest rewrite that is still shorter than the original is kept.
-    let best = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const out = (await chat(system, answer, { maxTokens: 400, temperature: 0.4 })).trim();
-      if (!out || !named.every((s) => out.toLowerCase().includes(s.toLowerCase()))) continue;
-      if (countSentences(out) <= budget.sentences + 1 && out.length <= budget.chars * 1.3) return out;
-      if (countSentences(out) < countSentences(answer) && (!best || countSentences(out) < countSentences(best))) best = out;
-    }
-    if (best) return best;
-  } catch (err) {
-    console.error('tighten answer:', err.message);
+// a sentence that ends properly (., !, ?, … maybe followed by a quote/bracket and emojis, or an emoji alone: "that's the path 🚀")
+const ENDS_SENTENCE = /(?:[.!?…]["'”’)\]]*|\p{Extended_Pictographic})\s*(?:[\p{Extended_Pictographic}‍️]\s*)*$/u;
+
+// Cut at the last FULL sentence inside the budget. Never sends half a sentence: an unfinished
+// last sentence (e.g. cut off by max_tokens) is dropped too. The first sentence is always kept.
+function cutToBudget(text, budget) {
+  const parts = text.split(/(?<=[.!?…]["'”’)\]]*)\s+/).filter((s) => s.trim());
+  while (parts.length > 1 && !ENDS_SENTENCE.test(parts[parts.length - 1])) parts.pop();
+  const out = [];
+  let len = 0;
+  for (const s of parts) {
+    if (out.length >= budget.sentences) break;
+    if (out.length && len + 1 + s.length > budget.chars) break;
+    out.push(s);
+    len += (out.length > 1 ? 1 : 0) + s.length;
   }
-  if (budget.sentences <= 3) return answer.split(/(?<=[.!?…])\s+/).slice(0, budget.sentences).join(' ');
-  return answer;
+  return out.join(' ');
 }
 
 // Vexo's last few replies (its own words only, nothing about members, memory only), so the next
@@ -222,21 +211,33 @@ async function converse(text, { isBoss = false, silentIfCasual = false, detectCr
     '  never say what HΛVØCZ staking pays, what gets staked (NFTs, tokens) or for how long unless the facts say so.',
     '  For any HΛVØCZ feature, say only what the facts say (that it is planned, which stage, its purpose if stated).',
     '  Describing how it works, what members lock up, do or earn with it, when the facts do not say so, IS inventing.',
-    '- Size follows the question. COUNT YOUR SENTENCES before answering:',
-    '  - BROAD ("what\'s the roadmap?", "what is HΛVØCZ?", "what\'s going on in this project?"): a full overview that touches',
-    '    EVERY main stage or part, in order, with the key idea of each but not every detail. 4-7 short sentences, never more,',
-    '    about 500-700 characters in total (no long run-on sentences).',
-    '    Group related stages in one sentence instead of one sentence per stage. Name every stage by its NAME inside the',
-    '    sentence, not by its phase number. The roadmap stages, in order (a roadmap or "what is HΛVØCZ" overview names ALL',
-    `    of them, skipping none): ${roadmapStages().join(', ') || '(see KNOWLEDGE)'}.`,
-    '    One smooth paragraph (two short paragraphs at most).',
-    '  - SPECIFIC ("when is the mint?", "what\'s staking?", "where do we use points?"): a focused answer of 1-3 sentences,',
-    '    never more, that includes the relevant connections (for example which stage it belongs to, what comes before or after).',
-    '  - Only if they explicitly ask for everything or an exact list ("list every phase", "give me everything"): longer,',
-    '    but still friendly, compact prose.',
+    '- STYLE: always English. Smart, warm and well organized: the most important thing first, then the rest in a natural',
+    '  order. Your own words, never text copied from KNOWLEDGE, no invented facts.',
+    '- KEEP IT SHORT. COUNT YOUR SENTENCES AND CHARACTERS before answering:',
+    '  - SPECIFIC (a normal question: "when is the mint?", "what\'s staking?", "where do I use points?"): 2-4 sentences,',
+    '    under about 500 characters, including the relevant connections (which stage it belongs to, what comes before or after).',
+    '  - BROAD ("what\'s the roadmap?", "what is HΛVØCZ?", "how do I earn points?"): at most 5 sentences, under about',
+    '    700 characters. A roadmap or "what is HΛVØCZ" overview touches EVERY stage in order with only its key idea; group',
+    '    two or three stages in one sentence. Name every stage by its NAME inside the sentence, not by its phase number.',
+    `    The roadmap stages, in order (skip none): ${roadmapStages().join(', ') || '(see KNOWLEDGE)'}.`,
+    '  - LORE (the lore, the story, what HΛVØCZ is about in spirit): 2-3 short, atmospheric sentences in your own words,',
+    '    mysterious and confident. Never paste the lore text unless they ask for the full lore.',
+    '  - FULL: only if they explicitly ask for full details or everything ("give me everything", "full lore", "list every',
+    '    phase"): longer, still compact prose, at most about 1200 characters.',
     '  - Lead with the HΛVØCZ answer. No filler closers ("Happy spending!", "Buckle up!", "Exciting times ahead!").',
-    '- Start a HΛVØCZ answer with a tag on its own: [BROAD], [SPECIFIC] or [FULL] (for the "give me everything" case),',
-    '  then the answer. The tag is removed before sending. Casual replies get no tag.',
+    '- POINTS:',
+    '  - "How do I earn points?" ALWAYS starts with the X post drop (dropping your X post in the HΛVØCZ X channel gives',
+    `    ${config.xDrop.points} points instantly, the fastest and biggest way), then being active, helping and being supportive,`,
+    '    reactions and overall engagement, then the daily bonus for the most active and supportive members, then Rumble',
+    '    Royale, daily games and giveaways, and it ENDS with what to do with points: redeem them in the Marketplace (shop',
+    '    channel, Purchase, pick a prize, confirm, get a receipt).',
+    '  - "What can I do with my points?" / "how do I use points?": redeem them in the Marketplace.',
+    '  - "Can I earn from giveaways / Rumble / games?": yes, winners receive points.',
+    `  - NEVER mention a daily limit, maximum, cap or scoring formula, and never give point amounts except that an X post`,
+    `    drop earns ${config.xDrop.points} points. Asked about a daily maximum or limit: answer playfully with no number or rule`,
+    '    (for example: there is always more to earn by being active and supportive).',
+    '- Start a HΛVØCZ answer with a tag on its own: [SPECIFIC], [BROAD], [LORE] or [FULL], then the answer. The tag is',
+    '  removed before sending. Casual replies get no tag.',
     '- STYLE EXAMPLE (a made-up project, only to show the shape; never reuse its words):',
     '  Q: "what\'s the roadmap?"  A: "[BROAD] It starts small: first the crew gets built and the story gets teased, then the',
     '  artists cook up the collection and the mint opens the doors. After that it grows into a real ecosystem with tools and a',
@@ -247,7 +248,7 @@ async function converse(text, { isBoss = false, silentIfCasual = false, detectCr
     '  BAD (invented mechanics, never do this): "holders can stake their NFTs or tokens to earn rewards".',
     '- FORMAT: plain conversational prose only. No numbered or bulleted lists, no headings, no bold, no "Phase I - ..."',
     '  formatting, no encyclopedia intros like "The HΛVØCZ roadmap outlines...". You may name a phase inside a sentence if',
-    '  it sounds natural, but rephrase the content. Use light humor and charm. Stay under 1500 characters.',
+    '  it sounds natural, but rephrase the content. Use light humor and charm. Stay inside the size limits above.',
     playful
       ? '- This time, end the answer with ONE short playful extra sentence (a statement, not a question, no pitch, no new facts).'
       : '',
@@ -292,23 +293,43 @@ async function converse(text, { isBoss = false, silentIfCasual = false, detectCr
   const user = context.length
     ? `RECENT CHAT (context only, not facts):\n${context.join('\n')}\n\n${label}: ${text.slice(0, 1000)}`
     : `${label}: ${text.slice(0, 1000)}`;
-  // 450 tokens fits a 7-sentence brief (or a longer "give me everything" answer) without cutting it off;
+  // an explicit "full details" request may run longer (FULL budget); everything else stays short.
   // temperature 0.8 so the same question gets fresh wording each time
-  let out = (await chat(system, user, { maxTokens: 450, temperature: 0.8 })).trim();
+  const wantsAll = /\b(everything|every (phase|stage|detail)|all (the )?(phases|stages|details)|full (details|list|roadmap|lore|story)|list (all|every|the phases))\b/i.test(text);
+  const maxTokens = wantsAll ? FULL_TOKENS : ANSWER_TOKENS;
+  let out = (await chat(system, user, { maxTokens, temperature: 0.8 })).trim();
 
-  // [BROAD] / [SPECIFIC] / [FULL] tag -> length budget; over budget = one rewrite call to tighten it.
-  // The model doesn't always tag, so untagged answers get the BROAD budget (casual replies are far
-  // below it), and an explicit "give me everything" / "list every phase" request always gets FULL.
-  const tag = /^\[(BROAD|SPECIFIC|FULL)\]\s*/i.exec(out);
+  // [SPECIFIC] / [BROAD] / [LORE] / [FULL] tag -> length budget. Over budget = regenerate ONCE with
+  // "Shorter, max N sentences"; still over = cut at the last full sentence inside the budget.
+  // Untagged answers get the BROAD budget (casual replies are far below it).
+  const TAG_RE = /^\[(BROAD|SPECIFIC|LORE|FULL)\]\s*/i;
+  let tag = TAG_RE.exec(out);
   if (tag) out = out.slice(tag[0].length).trim();
-  const wantsAll = /\b(everything|every (phase|stage|detail)|all (the )?(phases|stages|details)|full (details|list|roadmap)|list (all|every|the phases))\b/i.test(text);
   const kind = wantsAll ? 'FULL' : tag ? tag[1].toUpperCase() : 'BROAD';
-  if (!out.startsWith('UNKNOWN') && !out.startsWith('NO_REPLY') && !out.startsWith(CREATOR_QUESTION)) {
-    out = await tighten(out, BUDGET[kind], isBoss);
+  const special = (o) => o.startsWith('UNKNOWN') || o.startsWith('NO_REPLY') || o.startsWith(CREATOR_QUESTION);
+  if (!special(out)) {
+    const budget = BUDGET[kind];
+    // an unfinished last sentence only counts for tagged HΛVØCZ answers (casual chat may end without a period)
+    const unfinished = (o) => !!tag && !ENDS_SENTENCE.test(o);
+    if (!fits(out, budget) || unfinished(out)) {
+      try {
+        const limit = Number.isFinite(budget.sentences) ? `max ${budget.sentences} sentences, ` : '';
+        let again = (await chat(`${system}\n\nShorter, ${limit}under about ${budget.chars} characters. Full sentences only.`, user, { maxTokens, temperature: 0.8 })).trim();
+        const t2 = TAG_RE.exec(again);
+        if (t2) again = again.slice(t2[0].length).trim();
+        if (again && !special(again)) {
+          out = again;
+          tag = tag || t2;
+        }
+      } catch (err) {
+        console.error('shorter answer:', err.message);
+      }
+      if (!fits(out, budget) || unfinished(out)) out = cutToBudget(out, budget);
+    }
   }
   // model output -> the reply text (same steps for the first answer and a boss regeneration)
   function finish(raw) {
-    const o = raw.replace(/\[(BROAD|SPECIFIC|FULL)\]\s*/gi, '').trim(); // a stray tag never reaches Discord
+    const o = raw.replace(/\[(BROAD|SPECIFIC|LORE|FULL)\]\s*/gi, '').trim(); // a stray tag never reaches Discord
     if (o.startsWith('NO_REPLY')) return silentIfCasual ? null : pick(isBoss ? BOSS_FALLBACK : CASUAL_FALLBACK);
     if (o.startsWith(CREATOR_QUESTION)) return detectCreator && !isBoss ? CREATOR_QUESTION : pick(isBoss ? BOSS_FALLBACK : CASUAL_FALLBACK);
     if (o.startsWith('UNKNOWN')) {
@@ -339,7 +360,7 @@ async function converse(text, { isBoss = false, silentIfCasual = false, detectCr
     let statement = bossStatement(reply);
     if (!statement) {
       try {
-        const again = await chat(`${system}\n\nReply with a statement only, no question.`, user, { maxTokens: 450, temperature: 0.8 });
+        const again = await chat(`${system}\n\nReply with a statement only, no question.`, user, { maxTokens, temperature: 0.8 });
         statement = bossStatement(finish(again.trim()) || '');
       } catch (err) {
         console.error('boss statement retry:', err.message);

@@ -8,7 +8,30 @@
 - Official presence: Discord and X (Twitter).
 
 ## Lore
-- Lore will be revealed during Phase I. Not available yet.
+The system was never meant to break.
+Then came HΛVØCZ.
+
+Born from a glitch.
+Forged in chaos.
+Built by those who refused to follow the old rules.
+
+The fragments are connecting.
+The map is unfolding.
+And something deep within the system is waking up.
+
+HΛVØCZ isn't here to follow the rules.
+We're here to rewrite them.
+
+The chaos is only the beginning 🙅‍♂️🫀
+
+(For Vexo: when asked about the lore or what HΛVØCZ is about, answer in 2 to 3 short, atmospheric sentences in your own words, mysterious and confident. Do not paste the whole text unless asked for it.)
+
+## How points work
+- The fastest and biggest way to earn points is dropping your X post in the HΛVØCZ X channel: every X post you drop there is credited with 10 points instantly.
+- After that, points come from being genuinely active in the community: chatting, helping other members, being supportive, reacting to other members' messages, and overall engagement. Vexo assesses each member's overall participation and quality. Quality matters more than quantity, and spam earns nothing.
+- Every day, the most active and most supportive members receive bonus points.
+- Points can also be won in community events: Rumble Royale, daily games and giveaways hosted by the team. Winners receive points.
+- What to do with points: redeem them in the Marketplace. Open the shop channel, tap Purchase, pick a prize, confirm, and you receive a receipt. Prizes that need delivery are claimed through a ticket. Check your balance anytime with the My Points button.
 
 ## Mint
 - Total supply: 1,222 NFTs.
@@ -17,7 +40,6 @@
 - Mint price: not announced yet.
 - How to get OG or WL: not announced yet. Details will be shared in the official channels.
 
-## Roadmap (plans may change)
 
 ### Phase I - The Foundation
 - Establish the HΛVØCZ Discord and X presence.
