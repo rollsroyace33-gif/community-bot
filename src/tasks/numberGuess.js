@@ -24,6 +24,8 @@ const store = require('./store');
 const { report } = require('./report');
 const { ts, when } = require('./time');
 const { getTextChannel } = require('../utils');
+// shared with Rumble Royale: the prize classifier and the safe, idempotent points payout
+const { classifyPrize, payout } = require('./rumbleRoyale');
 
 const type = 'number_guess';
 const label = 'Number guess game';
@@ -112,15 +114,19 @@ function about() {
     'Vexo posts an announcement that pings the verified role; 2 minutes before, a reminder. At start Vexo picks a secret ' +
     'number (default 1-100, custom range allowed). Members guess by typing numbers. There are NO hints (no higher/lower): ' +
     'Vexo only reacts playfully now and then and chats with everyone. One guess ' +
-    `every 3 seconds, max ${g.maxGuessesPerUser} guesses each. First correct guess wins; the winner is told to open a ticket ` +
-    `and the boss gets a report (winner, number, stats). If nobody wins in ${g.durationMinutes} minutes, the number is revealed. ` +
-    'Optional prize text (the boss delivers it; points are NOT given automatically). One game per channel at a time.'
+    `every 3 seconds, max ${g.maxGuessesPerUser} guesses each. First correct guess wins and the boss gets a report ` +
+    `(winner, number, stats). If nobody wins in ${g.durationMinutes} minutes, the number is revealed. ` +
+    'Optional prize: a points prize ("50 points") is sent to the winner automatically; any other prize (NFT, SOL, WL...) ' +
+    'is claimed via a ticket. One game per channel at a time.'
   );
 }
 const fields = '"prize" (short text like "50 points", or null), "range" ([min,max] or null for 1-100)';
 
-// strip anything that could ping or link, the prize is shown in public messages
-const cleanPrize = (s) => s.replace(/@(everyone|here)/gi, '').replace(/<[@#][!&]?\d+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+// a points prize above RUMBLE_MAX_POINTS_PRIZE needs a second confirm (typo guard, same limit as Rumble)
+const isBigPrize = (params) => params.prize_type === 'points' && params.prize_points > config.rumble.maxPointsPrize;
+
+// params saved before prize_type existed: classified the same way
+const prizeInfo = (params = {}) => (params.prize_type ? params : { ...params, ...classifyPrize(params.prize) });
 
 function buildParams(p) {
   let range = DEFAULT_RANGE;
@@ -131,8 +137,9 @@ function buildParams(p) {
     }
     range = [lo, hi];
   }
-  const prize = typeof p.prize === 'string' && cleanPrize(p.prize) ? cleanPrize(p.prize) : null;
-  return { params: { range, prize } };
+  // same classifier as Rumble: "20 points" = auto-paid points, other text = ticket prize, empty = none
+  const { prize, prize_type, prize_points } = classifyPrize(typeof p.prize === 'string' ? p.prize : '');
+  return { params: { range, prize, prize_type, prize_points } };
 }
 
 function describe(task) {
@@ -213,6 +220,7 @@ async function startGame(task, client) {
     max: hi,
     secret: crypto.randomInt(lo, hi + 1), // crypto-secure, upper bound is exclusive
     prize: task.params?.prize || null,
+    params: prizeInfo(task.params || {}),
     startedAt: now,
     endsAt: now + config.game.durationMinutes * MIN,
     maxGuesses: config.game.maxGuessesPerUser,
@@ -257,12 +265,22 @@ async function endGame(game, client, reason) {
 
   const players = game.guesses.size;
   const w = game.winner;
+  const prizeParams = game.params || prizeInfo({ prize: game.prize });
+  const isPoints = reason === 'winner' && prizeParams.prize_type === 'points';
+  // points prize: credited BEFORE the announcement, through the Rumble payout (point_log + "paid" flag = never twice)
+  let pay = null;
+  if (isPoints) {
+    game.state = { ...game.state, secret: game.secret, winner: { id: w.id, tag: w.tag, guesses: w.guesses } };
+    pay = await payout({ taskId: game.taskId, state: game.state, winnerId: w.id, amount: prizeParams.prize_points, reason: `number_guess_prize task #${game.taskId}` });
+  }
   try {
     if (reason === 'winner') {
       const claim = config.channels.ticket
         ? ` Open a ticket in <#${config.channels.ticket}> to claim your prize!`
         : ' Open a ticket to claim your prize!';
-      await send(client, game.channelId, vary(WIN)(`<@${w.id}>`, game.secret, prizeText(game.prize)) + claim, { users: [w.id] });
+      // points sent = say so; payout failed or ticket prize = open a ticket; no prize = just celebrate
+      const tail = isPoints && pay.ok ? ` **${prizeParams.prize_points} points** have been sent to your balance! 💰` : prizeParams.prize_type === 'none' ? '' : claim;
+      await send(client, game.channelId, vary(WIN)(`<@${w.id}>`, game.secret, prizeText(game.prize)) + tail, { users: [w.id] });
     } else {
       await send(client, game.channelId, vary(reason === 'cancelled' ? CANCELLED : TIMEOUT)(game.secret));
     }
@@ -288,10 +306,18 @@ async function endGame(game, client, reason) {
   const stats = `Secret number: **${game.secret}** · ${game.totalGuesses} guesses from ${players} player${players === 1 ? '' : 's'}`;
   const prize = game.prize ? `Prize: **${game.prize}**` : 'Prize: none set';
   if (reason === 'winner') {
-    await report(
-      client,
-      `🏆 Boss, game #${game.taskId} is done!\nWinner: **${w.tag}** (<@${w.id}>, ID \`${w.id}\`), won on their guess #${w.guesses}\n${stats}\n${prize}. Deliver it once they open a ticket.`
-    );
+    let prizeLine;
+    if (isPoints && pay.ok) {
+      const bal = typeof pay.balance === 'number' ? ` New balance: **${pay.balance}** points.` : ' (already in the point log, not paid twice)';
+      prizeLine = `${prize}. ✅ **${prizeParams.prize_points} points credited automatically** to ID \`${w.id}\`.${bal}`;
+    } else if (isPoints) {
+      prizeLine = `${prize}. ❌ **Payout FAILED** for winner ID \`${w.id}\`, amount **${prizeParams.prize_points} points**: ${pay.error}. They were told to open a ticket, please credit it by hand.`;
+    } else if (prizeParams.prize_type === 'ticket') {
+      prizeLine = `${prize} (ticket prize). Deliver it once they open a ticket.`;
+    } else {
+      prizeLine = prize;
+    }
+    await report(client, `🏆 Boss, game #${game.taskId} is done!\nWinner: **${w.tag}** (<@${w.id}>, ID \`${w.id}\`), won on their guess #${w.guesses}\n${stats}\n${prizeLine}`);
   } else if (reason === 'timeout') {
     await report(client, `⏱️ Boss, game #${game.taskId} ended with **no winner**.\n${stats}\n${prize} (not given out).`);
   } else {
@@ -464,6 +490,7 @@ module.exports = {
   about,
   fields,
   buildParams,
+  isBigPrize,
   describe,
   tick,
   cancel,

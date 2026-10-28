@@ -457,23 +457,74 @@ async function postEmbed(game, embed) {
 
 const rolePing = () => (config.verifiedRoleId ? { text: `<@&${config.verifiedRoleId}> `, allowed: { roles: [config.verifiedRoleId] } } : { text: '', allowed: {} });
 
-function joinRow(game, disabled = false) {
+// ---------------------------------------------------------------- join announcement (one message: role ping + card + Join button)
+// mode: 'open' (live), 'closed' (window ended), 'cancelled'
+const JOIN_COLORS = { open: 0xe91e63, closed: 0x95a5a6, cancelled: 0x992d22 };
+const JOIN_TITLES = { open: '⚔️ RUMBLE ROYALE · ARENA OPEN', closed: '🔒 RUMBLE ROYALE · DOORS CLOSED', cancelled: '❌ RUMBLE ROYALE · CANCELLED' };
+
+function joinRow(game, mode = 'open') {
+  const open = mode === 'open';
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`rumble_join:${game.taskId}`)
-      .setLabel(disabled ? `Join window closed (${game.players.size})` : `Join the Rumble (${game.players.size})`)
+      .setLabel(open ? 'Join the Rumble' : 'Join window closed')
       .setEmoji('⚔️')
-      .setStyle(disabled ? ButtonStyle.Secondary : ButtonStyle.Success)
-      .setDisabled(disabled)
+      .setStyle(open ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(!open)
   );
 }
 
-// edit the join message's button (live count, or disabled at the end of the window)
-async function editJoin(game, disabled = false) {
+// message content: only the role ping + prize ("<@&role> 🎁 Prize: **10 points**"); no prize = just the ping.
+// Cut to 80 chars, markdown escaped, "@" / "<" defused so the text can never ping or break formatting.
+function joinContent(game) {
+  const p = game.params;
+  const prizeText = p.prize_type === 'points' ? `${p.prize_points} points` : p.prize_type === 'ticket' ? String(p.prize || '') : '';
+  const shortPrize = prizeText.length > 80 ? `${prizeText.slice(0, 79)}…` : prizeText;
+  const role = rolePing().text;
+  return shortPrize ? `${role}🎁 Prize: **${escapeMarkdown(shortPrize).replace(/@/g, '@​').replace(/</g, '<​')}**` : role.trim();
+}
+
+function joinPrizeValue(p) {
+  if (p.prize_type === 'points') return `**${p.prize_points} points**, sent automatically to the winner`;
+  if (p.prize_type === 'ticket') return `**${escapeMarkdown(String(p.prize || '')).slice(0, 900)}** (claimed via ticket)`;
+  return 'No prize this time, just eternal glory';
+}
+
+// the card, styled like the round cards (no pings inside)
+function joinEmbed(game, mode = 'open') {
+  const end = game.state.joinEndsAt;
+  return new EmbedBuilder()
+    .setTitle(JOIN_TITLES[mode] || JOIN_TITLES.open)
+    .setColor(JOIN_COLORS[mode] || JOIN_COLORS.open)
+    .setDescription(`${game.state.announceLine || ''}\n\nPress the button below to enter the arena.`.trim().slice(0, 4000))
+    .addFields(
+      { name: '🎁 Prize', value: joinPrizeValue(game.params), inline: true },
+      mode === 'open'
+        ? { name: '⏳ Game starts', value: `${ts(end, 't')} (${ts(end, 'R')})`, inline: true }
+        : { name: '🚪 Doors closed', value: ts(end, 't'), inline: true },
+      { name: '👥 Players joined', value: String(game.players.size), inline: true },
+      { name: '🎯 Minimum players', value: String(game.params.min_players || R().minPlayers), inline: true }
+    )
+    .setFooter({ text: 'Rumble Royale · hosted by Vexo' });
+}
+
+// the full message payload. Plain text only in the Embed Links fallback (state.joinPlain)
+function joinPayload(game, mode = 'open') {
+  const content = joinContent(game);
+  if (game.state.joinPlain) {
+    const status = mode === 'open' ? '' : mode === 'closed' ? '\n🔒 Doors closed.' : '\n❌ Cancelled.';
+    return { content: `${content}\n${game.state.announceLine || ''}\n👥 Players joined: **${game.players.size}**${status}`.trim(), embeds: [], components: [joinRow(game, mode)] };
+  }
+  return { content, embeds: [joinEmbed(game, mode)], components: [joinRow(game, mode)] };
+}
+
+// edit the join message (live count, closed or cancelled): always content + embeds + components together,
+// never re-pings (allowedMentions parse: []); the 20 s throttle lives in pulse()
+async function editJoin(game, mode = 'open') {
   game.countDirty = false;
   game.lastCountEdit = Date.now();
   if (!game.joinMsg) return;
-  await game.joinMsg.edit({ components: [joinRow(game, disabled)] }).catch((err) => console.error(`rumble #${game.taskId} join edit:`, err.message));
+  await game.joinMsg.edit({ ...joinPayload(game, mode), allowedMentions: { parse: [] } }).catch((err) => console.error(`rumble #${game.taskId} join edit:`, err.message));
 }
 
 // persist players + state (guarded: a cancelled/finished task is never revived)
@@ -575,14 +626,26 @@ async function openJoin(task, client) {
   const game = newGame(task, client, state);
   games.set(game.channelId, game);
   const ping = rolePing();
-  // the prize right next to the role ping, on its own first line ("<@&role> 🎁 Prize: **10 points**"); no prize = as before.
-  // Cut to 80 chars, markdown escaped, "@" / "<" defused so the text can never ping or break formatting.
-  const prizeText = game.params.prize_type === 'points' ? `${game.params.prize_points} points` : game.params.prize_type === 'ticket' ? String(game.params.prize || '') : '';
-  const shortPrize = prizeText.length > 80 ? `${prizeText.slice(0, 79)}…` : prizeText;
-  const prizeTag = shortPrize ? `${ping.text}🎁 Prize: **${escapeMarkdown(shortPrize).replace(/@/g, '@​').replace(/</g, '<​')}**\n` : ping.text;
-  const content = prizeTag + fill(draw(game, 'announce'), { prize_line: prizeLine(game.params), start_time: ts(state.joinEndsAt, 'R') });
+  // the template line goes in the card; saved so edits (and a restart) keep the same text
+  game.state.announceLine = fill(draw(game, 'announce'), { prize_line: prizeLine(game.params), start_time: ts(state.joinEndsAt, 'R') });
+  const allowedMentions = { parse: [], ...ping.allowed };
+  // plain text only when the card truly can't be sent (no Embed Links): one warning with the exact reason
+  const sendPlain = (why) => {
+    console.warn(`rumble #${task.id} join card not sent, using plain text: ${why}`);
+    game.state.joinPlain = true;
+    return channel.send({ ...joinPayload(game), allowedMentions });
+  };
   try {
-    game.joinMsg = await channel.send({ content, components: [joinRow(game)], allowedMentions: { parse: [], ...ping.allowed } });
+    const me = channel.guild?.members?.me;
+    const perms = me ? channel.permissionsFor(me) : null;
+    if (perms && !perms.has(PermissionFlagsBits.EmbedLinks)) {
+      game.joinMsg = await sendPlain('missing Embed Links permission');
+    } else {
+      game.joinMsg = await channel.send({ ...joinPayload(game), allowedMentions }).catch((err) => {
+        if (err?.code === 50013) return sendPlain(err.message); // Missing Permissions
+        throw err;
+      });
+    }
     game.state.joinMsgId = game.joinMsg.id;
     await saveState(game);
   } catch (err) {
@@ -692,7 +755,7 @@ async function closeJoin(game) {
   game.phase = 'closing';
   clearInterval(game.pulse);
   clearTimers(game);
-  await editJoin(game, true);
+  await editJoin(game, 'closed');
 
   const players = [...game.players.values()];
   const min = game.params.min_players || R().minPlayers;
@@ -906,7 +969,8 @@ const paying = new Set();
 
 // Credit the points prize. Idempotent: state.paid, plus the point_log entry (covers a crash between
 // the credit and saving the flag), plus an in-process lock against a double call at the same moment.
-// ctx: { taskId, state, winnerId, amount }   ->   { ok, balance } / { ok: false, error }
+// ctx: { taskId, state, winnerId, amount, reason? }   ->   { ok, balance } / { ok: false, error }
+// reason: point_log reason for other games (number guess); default = the Rumble one
 async function payout(ctx, deps = {}) {
   const pts = deps.points || points;
   const db = deps.db || supabase;
@@ -915,7 +979,7 @@ async function payout(ctx, deps = {}) {
   if (paying.has(taskId)) return { ok: false, busy: true, error: 'payout already in progress' };
   paying.add(taskId);
   try {
-    const reason = payoutReason(taskId);
+    const reason = ctx.reason || payoutReason(taskId);
     const { data, error } = await db.from('point_log').select('id').eq('reason', reason).limit(1);
     if (error) throw new Error(`point_log check: ${error.message}`);
     const alreadyLogged = !!(data && data.length);
@@ -1132,7 +1196,7 @@ async function cancel(task, { client }) {
     if (live.phase !== 'join') return refused;
     live.phase = 'cancelling';
     clearInterval(live.pulse);
-    await editJoin(live, true);
+    await editJoin(live, 'cancelled');
     await safePost(live, draw(live, 'cancelledByBoss'));
     await endGame(live, 'cancelled');
     return { ok: true };

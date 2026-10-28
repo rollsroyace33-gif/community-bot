@@ -233,14 +233,22 @@ async function scheduleOrder(message, ai, active) {
   if (clash) note += `\n⚠️ Heads up: it overlaps with #${clash.id} (${when(clash.run_at)}). Only one game runs per channel, so the later one would be cancelled.`;
 
   const [lo, hi] = params.range || [1, 100];
-  const prize = params.prize ? `prize: **${params.prize}**` : 'no prize';
+  // points prize = auto-paid to the winner; any other prize = claimed via ticket
+  const prize = !params.prize
+    ? 'no prize'
+    : params.prize_type === 'points'
+      ? `prize: **${params.prize}**, ${params.prize_points} points will be sent automatically to the winner`
+      : `prize: **${params.prize}** (claim via ticket)`;
+  const big = handler.isBigPrize ? handler.isBigPrize(params) : false;
+  if (big) note += `\n⚠️ **That is more than ${config.rumble.maxPointsPrize} points.** Double-check it, this needs a second confirm.`;
   const summary = `${lead}${handler.label} at **${when(time.date)}** in <#${channelId}>, numbers ${lo}-${hi}, ${prize}.${note}\nConfirm? (yes/no)`;
   const describe =
     `schedule ${handler.type} at boss clock ${bossLocal(time.date)}, ` +
     `prize ${params.prize || 'none'}, range ${lo}-${hi}, channel ${channelId === config.channels.general ? 'general' : 'other'}`;
   const draftTime = { local: bossWall(time.date), zone: null }; // "make it 9 instead" keeps the rest
 
-  return propose(message, 'schedule', { task_type: handler.type, prize: params.prize, range: params.range, channel: ai.channel, time: draftTime }, describe, summary, async () => {
+  const draft = { task_type: handler.type, prize: params.prize, range: params.range, channel: ai.channel, time: draftTime };
+  const create = async () => {
     // confirmed late? still give members at least a minute's notice
     const runAt = new Date(Math.max(time.date.getTime(), Date.now() + MIN_NOTICE_MS));
     const row = await store.create({
@@ -254,6 +262,15 @@ async function scheduleOrder(message, ai, active) {
     });
     tickSoon(); // announces right away if we're already inside the announcement window
     return { text: `Scheduled ${handler.describe(row)}`, note: `task #${row.id} created: ${describe}` };
+  };
+  if (!big) return propose(message, 'schedule', draft, describe, summary, create);
+  // typo guard (same as Rumble): the first yes asks once more
+  return propose(message, 'schedule', draft, describe, summary, async () => {
+    pending = { kind: 'schedule', draft, describe: `${describe} (waiting for the second yes)`, run: create, expiresAt: Date.now() + PENDING_TTL_MS };
+    return {
+      text: `⚠️ Second check: **${params.prize_points} points** is above RUMBLE_MAX_POINTS_PRIZE (${config.rumble.maxPointsPrize}).\nConfirm again? (yes/no)`,
+      note: 'waiting for the second yes (big points prize)',
+    };
   });
 }
 
