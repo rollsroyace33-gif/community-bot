@@ -26,6 +26,8 @@ const { allowQa } = require('./ratelimit');
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const draw = createBag();
 const quiet = { repliedUser: false, parse: [] }; // never ping anyone by accident
+// one log line explaining why a message got no reply (never logs message content)
+const why = (message, reason) => console.log(`[reply] ${message.id} in #${message.channelId}: ${reason}`);
 
 // AI down: playful lines, no pitch
 const GLITCH = ['My brain lagged for a sec 😵 Try me again in a moment?', 'Signal got fuzzy on my end. One more time in a bit?'];
@@ -75,12 +77,12 @@ async function handleGreeting(message) {
   if (!pool) return false;
 
   const now = Date.now();
-  if (now - (lastGreet.get(message.author.id) || 0) < GREET_COOLDOWN_MS) return false;
+  if (now - (lastGreet.get(message.author.id) || 0) < GREET_COOLDOWN_MS) return why(message, 'greeting skipped: 1h greeting cooldown'), false;
   lastGreet.set(message.author.id, now);
 
   await message
     .reply({ content: pick(pool)(`<@${message.author.id}>`), allowedMentions: { users: [message.author.id], repliedUser: false } })
-    .catch((err) => console.error('greeting reply:', err.message));
+    .catch((err) => console.error('greeting reply:', err.stack));
   return true;
 }
 
@@ -90,7 +92,7 @@ async function sendCreatorReply(message, { useAi }) {
   const content = await personality.creatorReply({ useAi }); // never throws, falls back to fixed lines
   await message
     .reply({ content, allowedMentions: personality.creatorMentions() }) // pings the boss only
-    .catch((err) => console.error('creator reply:', err.message));
+    .catch((err) => console.error('creator reply:', err.stack));
 }
 
 // ---------------- Conversation ----------------
@@ -99,7 +101,7 @@ async function converse(message, { isBoss, isAsk, addr }) {
   const botId = message.client.user.id;
   const text = message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim();
   // un-addressed #ask messages need some substance; a bare "@Vexo" still gets a reply
-  if (!addr.any && text.length < 5) return false;
+  if (!addr.any && text.length < 5) return why(message, 'no reply: un-addressed #ask message too short'), false;
   const said = text || '(pinged you without saying anything)';
 
   // cheap regex first (members only: the boss knows who made Vexo, the AI answers him in character)
@@ -107,7 +109,8 @@ async function converse(message, { isBoss, isAsk, addr }) {
     const withinLimit = allowQa(message.author.id);
     // over the hourly limit: direct mentions still get a fixed (no-AI) answer, #ask gets ⏳
     if (!withinLimit && !addr.any) {
-      await message.react('⏳').catch(() => {});
+      why(message, 'no reply: QA_PER_HOUR rate limit (creator question)');
+      await message.react('⏳').catch((err) => console.error('react:', err.stack));
       return false;
     }
     await sendCreatorReply(message, { useAi: withinLimit });
@@ -116,12 +119,13 @@ async function converse(message, { isBoss, isAsk, addr }) {
 
   // members: max QA_PER_HOUR AI replies per hour. The boss is never rate limited.
   if (!isBoss && !allowQa(message.author.id)) {
-    if (addr.mentioned) await message.reply('Easy there, my brain needs a breather. Try me again a bit later ⏳').catch(() => {});
-    else if (isAsk && !addr.any) await message.react('⏳').catch(() => {});
+    why(message, 'no AI reply: QA_PER_HOUR rate limit');
+    if (addr.mentioned) await message.reply('Easy there, my brain needs a breather. Try me again a bit later ⏳').catch((err) => console.error('rate limit reply:', err.stack));
+    else if (isAsk && !addr.any) await message.react('⏳').catch((err) => console.error('react:', err.stack));
     return false; // called by name / replied to: just stay quiet
   }
 
-  await message.channel.sendTyping().catch(() => {});
+  await message.channel.sendTyping().catch((err) => console.error('sendTyping (missing permission?):', err.stack));
   try {
     const reply = await ai.converse(said, {
       isBoss,
@@ -129,19 +133,24 @@ async function converse(message, { isBoss, isAsk, addr }) {
       detectCreator: !isBoss,
       context: chatContext.get(message.channelId), // recent chat, recorded before this message
     });
-    if (!reply) return false;
+    if (!reply) return why(message, 'no reply: AI chose to stay silent (casual / empty answer)'), false;
     // the AI recognized a "who made you" question the regex missed
     if (reply === ai.CREATOR_QUESTION) {
       await sendCreatorReply(message, { useAi: true });
       return true;
     }
-    await message.reply({ content: reply.slice(0, 1900), allowedMentions: quiet });
+    try {
+      await message.reply({ content: reply.slice(0, 1900), allowedMentions: quiet });
+    } catch (err) {
+      console.error('AI reply send failed (missing permission?):', err.stack);
+      throw err;
+    }
     chatContext.recordBot(message.channelId, reply);
     return true;
   } catch (err) {
-    console.error('reply error:', err.message);
+    console.error('reply error:', err.stack);
     if (addr.any || isBoss) {
-      await message.reply({ content: pick(isBoss ? BOSS_GLITCH : GLITCH), allowedMentions: quiet }).catch(() => {});
+      await message.reply({ content: pick(isBoss ? BOSS_GLITCH : GLITCH), allowedMentions: quiet }).catch((e) => console.error('glitch reply:', e.stack));
       return true;
     }
     return false;
@@ -164,8 +173,8 @@ function welcomeLine(awayMs) {
 // to / mentioning another member. true = the line was sent.
 async function welcomeBack(message, { awayMs, addressed }) {
   if (awayMs === null || awayMs === undefined || awayMs < config.bossAwayHours * 3600000) return false;
-  if (!addressed && (await bossGate.bossTalksToOthers(message, message.client))) return false;
-  await message.reply({ content: welcomeLine(awayMs), allowedMentions: { repliedUser: false, parse: [] } }).catch((err) => console.error('welcome back:', err.message));
+  if (!addressed && (await bossGate.bossTalksToOthers(message, message.client))) return why(message, 'no welcome back: boss is talking to someone else'), false;
+  await message.reply({ content: welcomeLine(awayMs), allowedMentions: { repliedUser: false, parse: [] } }).catch((err) => console.error('welcome back:', err.stack));
   return true;
 }
 
@@ -176,19 +185,20 @@ async function bossMessage(message, { isAsk, addr, awayMs }) {
   // checked again so no path can answer him otherwise. (The old "#ask channel = always answer the
   // boss" rule is gone: #ask is the same channel as #open-floor, so he got a reply to everything.)
   const via = await bossGate.addressedVia(message, message.client); // 'mention' | 'reply' | 'name' | null
-  if (!via) return;
+  if (!via) return why(message, 'no boss reply: not addressed to Vexo');
 
   const text = message.content.replace(new RegExp(`<@!?${message.client.user.id}>`, 'g'), '').trim();
   if (isClosingRemark(text)) {
-    await message.react(draw('reaction', T.bossReactions)).catch(() => {});
+    why(message, 'boss closing remark: reaction only');
+    await message.react(draw('reaction', T.bossReactions)).catch((err) => console.error('react:', err.stack));
     return; // "ok", "lol", pure emoji: a reaction at most, never a text reply
   }
 
   const now = clock.now();
   const st = bossState.get(message.channelId) || { lastReplyAt: 0, inARow: 0 };
   const explicit = via === 'mention' || via === 'reply';
-  if (!explicit && now - st.lastReplyAt < BOSS_COOLDOWN_MS) return; // per-channel cooldown
-  if (!explicit && st.inARow >= MAX_IN_A_ROW) return; // at most 2 in a row unless he mentions / replies
+  if (!explicit && now - st.lastReplyAt < BOSS_COOLDOWN_MS) return why(message, 'no boss reply: per-channel cooldown'); // per-channel cooldown
+  if (!explicit && st.inARow >= MAX_IN_A_ROW) return why(message, 'no boss reply: max replies in a row'); // at most 2 in a row unless he mentions / replies
 
   // he is talking to Vexo (checked above), so converse() treats it as addressed in every channel
   const replied = await converse(message, { isBoss: true, isAsk, addr: { ...addr, any: true } });
@@ -212,19 +222,20 @@ async function respond(message, { awayMs = null } = {}) {
     }
     bossState.delete(message.channelId); // another human spoke: the boss's "in a row" count starts over
 
-    if (await bossCover.handle(message)) return { isAsk, isBoss }; // a.
+    if (await bossCover.handle(message)) return why(message, 'handled by boss cover'), { isAsk, isBoss }; // a.
 
     const greeted = await handleGreeting(message).catch((err) => (console.error('greeting:', err.message), false)); // b.
     // a plain "gm vexo" was already answered by the greeting; "gm vexo, when mint?" still gets an answer
     const greetingOnly = greeted && !message.content.includes('?');
-    if (greetingOnly) return { isAsk, isBoss };
+    if (greetingOnly) return why(message, 'greeting sent, no further reply'), { isAsk, isBoss };
     if (isAsk || addr.any) {
       await converse(message, { isBoss: false, isAsk, addr });
       return { isAsk, isBoss };
     }
-    await offlineChat.handle(message); // d.
+    const chatted = await offlineChat.handle(message); // d.
+    if (!chatted) why(message, 'no reply: not addressed to Vexo and offline chat did not trigger (hours / quiet channel / limits)');
   } catch (err) {
-    console.error('conversation:', err.message);
+    console.error('conversation:', err.stack);
   }
   return { isAsk, isBoss };
 }

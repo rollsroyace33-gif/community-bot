@@ -1,21 +1,59 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+
+const step = (msg) => console.log(`[startup] step: ${msg}`);
+const STEP_TIMEOUT_MS = 15000;
+
+// Promise.race with a timeout: logs which step timed out instead of hanging silently.
+// Resolves to `fallback` on timeout or error (never throws), so callers can just continue.
+function withTimeout(label, promiseOrFn, fallback = undefined, ms = STEP_TIMEOUT_MS) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.error(`[startup] TIMEOUT: "${label}" did not finish within ${ms / 1000}s, continuing without it`);
+      resolve(fallback);
+    }, ms);
+  });
+  const work = Promise.resolve()
+    .then(() => (typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn))
+    .catch((err) => {
+      console.error(`[startup] FAILED: "${label}":`, err && err.stack ? err.stack : err);
+      return fallback;
+    });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+// process-level safety nets first, so nothing below can fail silently
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e && e.stack ? e.stack : e));
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e && e.stack ? e.stack : e));
+
+step('loading discord.js...');
 const { Client, GatewayIntentBits, Partials, Collection, Events } = require('discord.js');
+step('discord.js loaded');
+
+step('loading config (.env / environment)...');
 const config = require('./config');
+step('config loaded');
+
+step('loading schedulers...');
 const { startScheduler, stopScheduler } = require('./jobs/scheduler');
 const { startTaskScheduler, stopTaskScheduler } = require('./tasks');
+step('schedulers loaded');
 
+step('checking required env vars...');
 for (const key of ['token', 'clientId', 'guildId', 'supabaseUrl', 'supabaseKey']) {
   if (!config[key]) {
     console.error(`Missing config: ${key}. Please check your .env file.`);
     process.exit(1);
   }
 }
+step(`env vars ok (DISCORD_TOKEN length ${config.token.length})`);
 
 // one line about BOSS_USER_ID (never its value) + a clear warning if it can't be right
 require('./identity').checkBossConfig();
 
+step('creating Discord client...');
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -26,48 +64,112 @@ const client = new Client({
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
 });
+step('Discord client created');
 
+step('loading slash command modules...');
 client.commands = new Collection();
 const dir = path.join(__dirname, 'commands');
 for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
   const cmd = require(path.join(dir, file));
   client.commands.set(cmd.data.name, cmd);
 }
+step(`${client.commands.size} slash command module(s) loaded (registration is done separately by "npm run deploy")`);
 
-client.once(Events.ClientReady, (c) => {
-  console.log(`Logged in as ${c.user.tag}`);
-  startScheduler(client);
-  startTaskScheduler(client); // control channel tasks (number guess game); warns if CONTROL_CHANNEL_ID is empty
-  require('./tasks/rumbleRoyale').startupCheck(client); // one line about RUMBLE_CHANNEL_ID + permission warnings
-  require('./xDrop').startupCheck(); // one warning when X_DROP_CHANNEL_ID is empty (feature off)
-  require('./bossPresence').load(); // the boss's last message time (welcome back survives restarts)
+// ---------------- Discord diagnostics ----------------
+let ready = false;
+client.on(Events.Error, (e) => console.error('[discord] client error:', e && e.stack ? e.stack : e));
+client.on(Events.Warn, (m) => console.error('[discord] warn:', m));
+client.on(Events.ShardError, (e, id) => console.error(`[discord] shard ${id} error:`, e && e.stack ? e.stack : e));
+client.on(Events.ShardDisconnect, (ev, id) => console.error(`[discord] shard ${id} disconnected: code ${ev?.code} ${ev?.reason || ''}`));
+client.on(Events.ShardReconnecting, (id) => console.error(`[discord] shard ${id} reconnecting...`));
+client.on(Events.ShardResume, (id, n) => console.log(`[discord] shard ${id} resumed (${n} events replayed)`));
+client.on(Events.Invalidated, () => console.error('[discord] session invalidated'));
+client.rest.on('rateLimited', (info) =>
+  console.error(
+    `[discord] REST rate limited: ${info.method} ${info.route} retry in ${info.timeToReset ?? info.retryAfter}ms (global: ${info.global}, limit: ${info.limit})`
+  )
+);
+// Gateway/REST debug lines until 'ready' (they show exactly where login stops). Token is never in them.
+client.on(Events.Debug, (m) => {
+  if (!ready && !/heartbeat/i.test(m)) console.log('[discord debug]', m);
+});
+
+// ---------------- ready: everything that talks to the network runs AFTER login ----------------
+client.once(Events.ClientReady, async (c) => {
+  ready = true;
+  console.log(`[startup] step: READY, logged in as ${c.user.tag} (${c.user.id}), in ${c.guilds.cache.size} guild(s)`);
+
+  // none of these can block or crash the bot; each logs its own start/end/timeout
+  try {
+    step('starting daily scheduler...');
+    startScheduler(client);
+    step('daily scheduler started');
+  } catch (e) {
+    console.error('[startup] daily scheduler failed:', e.stack);
+  }
+  try {
+    step('starting task scheduler...');
+    startTaskScheduler(client); // control channel tasks (number guess game); warns if CONTROL_CHANNEL_ID is empty
+    step('task scheduler started');
+  } catch (e) {
+    console.error('[startup] task scheduler failed:', e.stack);
+  }
+  try {
+    require('./xDrop').startupCheck(); // one warning when X_DROP_CHANNEL_ID is empty (feature off)
+  } catch (e) {
+    console.error('[startup] xDrop check failed:', e.stack);
+  }
+
+  // network steps run in parallel, each with a 15s timeout
+  const jobs = [
+    (async () => {
+      step('rumble startup check...');
+      await withTimeout('rumble startup check', () => require('./tasks/rumbleRoyale').startupCheck(client));
+      step('rumble startup check done');
+    })(),
+    (async () => {
+      step('loading boss presence (Supabase)...');
+      await withTimeout('boss presence load (Supabase)', () => require('./bossPresence').load());
+      step('boss presence loaded');
+    })(),
+    (async () => {
+      step('loading knowledge (Supabase)...');
+      const f = await withTimeout('knowledge load (Supabase)', () => require('./knowledge').loadFacts(), null);
+      step(f ? `knowledge loaded: ${f.length} taught fact(s)` : 'knowledge NOT loaded (see error above)');
+    })(),
+  ];
   // shop channel: one header (edited in place), old per-item cards removed (bot-posted only)
   if (config.channels.marketplace) {
-    require('./marketplace')
-      .syncShop(client)
-      .catch((e) => console.error('Marketplace sync:', e.message));
+    jobs.push(
+      (async () => {
+        step('syncing marketplace...');
+        await withTimeout('marketplace sync', () => require('./marketplace').syncShop(client), undefined, 60000);
+        step('marketplace sync done');
+      })()
+    );
   }
-  // facts the boss taught in the control channel (cached; refreshed after every change)
-  require('./knowledge')
-    .loadFacts()
-    .then((f) => console.log(`Loaded ${f.length} taught fact(s)`));
+  await Promise.allSettled(jobs);
+  step('all post-login startup steps finished');
 });
+
+step('registering event handlers...');
 client.on(Events.MessageCreate, require('./events/messageCreate'));
 client.on(Events.MessageReactionAdd, require('./events/reactionAdd'));
 client.on(Events.InteractionCreate, require('./events/interactionCreate'));
 client.on(Events.GuildMemberAdd, require('./events/guildMemberAdd'));
-
-process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
+step('event handlers registered');
 
 // tiny web server so Render (Web Service) sees an open port + uptime pings work.
 // GET/HEAD /health (and /) -> 200 "ok", anything else -> 404. It never shows any bot info.
+step('starting HTTP /health server...');
 const server = http.createServer((req, res) => {
   const url = (req.url || '').split('?')[0];
   const ok = (req.method === 'GET' || req.method === 'HEAD') && (url === '/health' || url === '/');
   res.writeHead(ok ? 200 : 404, { 'Content-Type': 'text/plain' });
   res.end(ok ? 'ok' : 'not found');
 });
-server.listen(process.env.PORT || 3000);
+server.on('error', (e) => console.error('[startup] HTTP server error:', e.stack));
+server.listen(process.env.PORT || 3000, () => step(`HTTP /health server listening on port ${process.env.PORT || 3000}`));
 
 // graceful shutdown: Render sends SIGTERM on every redeploy/restart.
 // Only stops timers and disconnects; running games are NOT ended here. Their state stays in
@@ -91,11 +193,68 @@ async function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT')); // Ctrl+C locally
 
-// exit on login failure, otherwise the web server keeps a dead bot alive holding the port
-client.login(config.token).catch((e) => {
-  console.error('Discord login failed:', e.message);
-  if (/disallowed intents/i.test(e.message)) {
-    console.error('Turn ON "Server Members Intent" and "Message Content Intent" in the Developer Portal (Bot page).');
+// Diagnostic only (does NOT block login): asks Discord directly whether this server's IP may log in.
+// A 429 here (often an HTML Cloudflare page "error code: 1015") means Discord is rate-limiting / banning
+// the shared outbound IP of this host. discord.js then waits silently, which looks like "no logs at all".
+async function probeGateway() {
+  step('probing Discord API (GET /gateway/bot)...');
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), STEP_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://discord.com/api/v10/gateway/bot', {
+      headers: { Authorization: `Bot ${config.token}` },
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    const body = text.slice(0, 300).replace(/\s+/g, ' ');
+    if (res.ok) {
+      let j = {};
+      try {
+        j = JSON.parse(text);
+      } catch {}
+      const s = j.session_start_limit;
+      step(`Discord API reachable: HTTP 200${s ? `, session starts left today: ${s.remaining}/${s.total}` : ''}`);
+      if (s && s.remaining === 0) console.error(`[startup] NO session starts left! Resets in ${Math.round(s.reset_after / 60000)} min.`);
+    } else {
+      console.error(
+        `[startup] Discord API probe: HTTP ${res.status} retry-after=${res.headers.get('retry-after')} global=${res.headers.get('x-ratelimit-global')} scope=${res.headers.get('x-ratelimit-scope')} body: ${body}`
+      );
+      if (res.status === 401) console.error('[startup] 401 = DISCORD_TOKEN is invalid (reset it in the Developer Portal and update Render).');
+      if (res.status === 429) console.error('[startup] 429 = this host IP is rate-limited/banned by Discord. Login will wait until it clears. Fix: Render "Clear build cache & deploy" / restart to get a new IP, or move hosts.');
+    }
+  } catch (e) {
+    console.error(`[startup] Discord API probe failed: ${e.name === 'AbortError' ? 'TIMEOUT after 15s (network to discord.com blocked?)' : e.message}`);
+  } finally {
+    clearTimeout(t);
   }
-  process.exit(1);
-});
+}
+
+// ---------------- login: nothing above awaits the network, so nothing can block this ----------------
+async function login() {
+  const probe = probeGateway(); // runs in parallel, never blocks login
+
+  const pending = setTimeout(() => {
+    if (!ready) console.error('[startup] login still pending after 30s ("ready" has not fired). See [discord debug] / probe lines above.');
+  }, 30000);
+  const pending2 = setInterval(() => {
+    if (ready) return clearInterval(pending2);
+    console.error('[startup] still not ready, waiting on Discord...');
+  }, 60000);
+
+  try {
+    step('logging in to Discord...');
+    await client.login(config.token);
+    step('login resolved (waiting for "ready" event)');
+  } catch (err) {
+    clearTimeout(pending);
+    clearInterval(pending2);
+    // exit on login failure, otherwise the web server keeps a dead bot alive holding the port
+    console.error('Discord login failed:', err.stack);
+    if (/disallowed intents/i.test(err.message)) {
+      console.error('Turn ON "Server Members Intent" and "Message Content Intent" in the Developer Portal (Bot page).');
+    }
+    await probe; // let the API probe print its result first (it has its own 15s timeout)
+    process.exit(1);
+  }
+}
+login();

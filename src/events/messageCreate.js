@@ -42,22 +42,25 @@ function clean(text) {
     .trim();
 }
 
+// one log line per early return: why a message got no (further) handling. Never logs message content.
+const skip = (message, reason) => console.log(`[msg] ${message.id} in #${message.channelId} by ${message.author?.id}: ${reason}`);
+
 // ---------------- Points ----------------
 async function handlePoints(message) {
   const { author, member } = message;
-  if (!member) return;
-  if (config.filters.excludedChannels.includes(message.channelId)) return;
-  if (!points.isEligible(member, author)) return;
+  if (!member) return skip(message, 'no points: no guild member object');
+  if (config.filters.excludedChannels.includes(message.channelId)) return skip(message, 'no points: excluded channel');
+  if (!points.isEligible(member, author)) return skip(message, 'no points: member not eligible (account age / role)');
 
   const text = clean(message.content);
-  if (text.length < config.filters.minLength) return;
+  if (text.length < config.filters.minLength) return skip(message, 'no points: message too short');
 
   const now = Date.now();
-  if (now - (lastMsgTime.get(author.id) || 0) < config.filters.minGapSeconds * 1000) return;
+  if (now - (lastMsgTime.get(author.id) || 0) < config.filters.minGapSeconds * 1000) return skip(message, 'no points: cooldown between messages');
 
   const norm = text.toLowerCase();
   const recent = recentMsgs.get(author.id) || [];
-  if (recent.includes(norm)) return; // repeated message
+  if (recent.includes(norm)) return skip(message, 'no points: duplicate of a recent message'); // repeated message
   recent.push(norm);
   if (recent.length > 5) recent.shift();
   recentMsgs.set(author.id, recent);
@@ -80,7 +83,12 @@ async function handlePoints(message) {
 
 module.exports = async function onMessageCreate(message) {
   try {
-    if (message.author.bot || !message.guild) return;
+    if (message.author.bot) return skip(message, 'ignored: author is a bot');
+    if (!message.guild) return skip(message, 'ignored: not in a guild (DM)');
+    if (!message.content && message.author.id !== message.client.user.id) {
+      // empty content for a normal text message usually means the Message Content Intent is missing
+      skip(message, 'warning: empty message content (Message Content Intent enabled in the Developer Portal?)');
+    }
 
     // X post drop: before the boss gate, so it works the same for everyone (never throws)
     const isDrop = await xDrop.handle(message);
@@ -107,7 +115,10 @@ module.exports = async function onMessageCreate(message) {
     }
 
     // 4. private control channel: boss/staff orders only, nothing else runs there
-    if (!gameOwned && (await tasks.handleControlMessage(message))) return;
+    if (gameOwned) skip(message, 'a running game owns this channel: no chat replies (points still count)');
+    if (!gameOwned && (await tasks.handleControlMessage(message))) return skip(message, 'handled as a control channel order');
+    if (isBoss && !mayReply) skip(message, 'boss message not addressed to Vexo (boss gate): only welcome-back may reply');
+    if (isDrop) skip(message, 'X drop handled: no other reply');
 
     // 5. everything else that can make Vexo talk; never throws, so points below always run
     let isAsk = !!config.channels.ask && message.channelId === config.channels.ask;
@@ -123,10 +134,10 @@ module.exports = async function onMessageCreate(message) {
     // 7. short-term context for later replies (memory only; added after the reply so it isn't duplicated in the prompt)
     chatContext.record(message);
     // a dedicated Q&A channel does not earn points (but it does when it is also the general channel)
-    if (isAsk && message.channelId !== config.channels.general) return;
+    if (isAsk && message.channelId !== config.channels.general) return skip(message, 'no points: #ask channel');
     await handlePoints(message);
   } catch (err) {
-    console.error('messageCreate error:', err);
+    console.error('messageCreate error:', err && err.stack ? err.stack : err);
   }
 };
 
