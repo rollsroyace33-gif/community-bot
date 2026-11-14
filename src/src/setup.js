@@ -285,7 +285,7 @@ async function createMissingHome(guild) {
           const found = guild.channels.cache.find((c) => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === 'vexo');
           categoryId = found ? found.id : (await guild.channels.create({ name: 'Vexo', type: ChannelType.GuildCategory })).id;
         }
-        const ch = await guild.channels.create({ name: spec.name, type: ChannelType.GuildText, parent: categoryId, topic: spec.topic, permissionOverwrites: overwritesFor(guild, bot.id, spec, config.bossUserId || null) });
+        const ch = await guild.channels.create({ name: spec.name, type: ChannelType.GuildText, parent: categoryId, topic: spec.topic, permissionOverwrites: overwritesFor(guild, bot.id, spec, guilds.settings(guild.id).bossUserId || null) });
         id = ch.id;
         out.created.push(key);
       }

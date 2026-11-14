@@ -1,11 +1,10 @@
-// /setup: (re)creates anything missing, then lets the admin change settings with Discord menus
-// (no copying of IDs): swap a channel for an existing one, the game ping role, knowledge source
-// channels, the boss, and the ticket instructions. Manage Server or the boss of this server.
+// /setup: the SAME setup for every server, HΛVØCZ included: the same menu, the same channel pickers, the same
+// checks, and the choices saved per server in the guilds table. Manage Server or the boss of this server.
 //
-// HΛVØCZ (home server): nothing is created automatically. The menus save choices in its guilds row; a choice
-// wins over the .env value, anything not chosen keeps its .env value. A "Create missing channels" button
-// creates (or reuses by name) only what is missing, and only when pressed. The boss (BOSS_USER_ID) and the
-// ticket text of HΛVØCZ are not changed here.
+// The only differences in HΛVØCZ (the home server):
+//   - anything NOT chosen in /setup falls back to its .env value (choose "none" in a picker = back to .env);
+//   - nothing is created automatically: a "Create missing channels" button creates sol-radar, nft-radar and
+//     giveaways only when pressed. Customer servers get their channels from the automatic setup instead.
 const {
   SlashCommandBuilder, PermissionFlagsBits, MessageFlags, ActionRowBuilder, StringSelectMenuBuilder, ChannelSelectMenuBuilder,
   RoleSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ChannelType, ButtonBuilder, ButtonStyle,
@@ -15,82 +14,61 @@ const plans = require('../plans');
 const setup = require('../setup');
 const learn = require('../learn');
 const identity = require('../identity');
+const { BUILD } = require('../build');
 
 const EPH = { flags: MessageFlags.Ephemeral };
+const BUILD_LINE = `-# build: ${BUILD}`;
+// ONE list of channels for every server (saved key -> label). "assistant" only where Personal Vexo is on.
 const CHANNEL_KEYS = {
-  control: 'Control channel (private, talk to Vexo)',
-  marketplace: 'Marketplace channel (points shop)',
-  rumble: 'Rumble channel',
-  games: 'Number guess channel',
-  xDrop: 'X posts channel (members earn points for X links)',
-  giveaway: 'Giveaway channel',
-  nftRadar: 'NFT Radar channel',
-  solRadar: 'SOL Radar channel',
-  assistant: 'Get Vexo Assistant channel (members request Personal Vexo)', // only offered where Personal Vexo is on
-  logs: 'Logs channel (private)',
-};
-// HΛVØCZ: the channels /setup may change (saved key -> label). Same saved keys as other servers + welcome / ask.
-const HOME_CHANNEL_LABELS = {
   control: 'Control channel (private, talk to Vexo)',
   logs: 'Logs channel (private: feature logs, approvals, scam alerts)',
   marketplace: 'Marketplace channel (points shop)',
   rumble: 'Rumble channel',
   games: 'Number guess + daily top chatter channel',
-  xDrop: 'X posts channel',
+  xDrop: 'X posts channel (members earn points for X links)',
   giveaway: 'Giveaway channel',
   nftRadar: 'NFT Radar channel',
   solRadar: 'SOL Radar channel',
   welcome: 'Welcome channel (new members)',
   ask: 'Ask channel (Q&A)',
+  assistant: 'Get Vexo Assistant channel (members request Personal Vexo)',
 };
-const SHORT = { control: 'Control', logs: 'Logs', marketplace: 'Marketplace', rumble: 'Rumble', games: 'Number guess', xDrop: 'X posts', giveaway: 'Giveaways', nftRadar: 'NFT Radar', solRadar: 'SOL Radar', welcome: 'Welcome', ask: 'Ask (Q&A)' };
+const SHORT = { control: 'Control', logs: 'Logs', marketplace: 'Marketplace', rumble: 'Rumble', games: 'Number guess', xDrop: 'X posts', giveaway: 'Giveaways', nftRadar: 'NFT Radar', solRadar: 'SOL Radar', welcome: 'Welcome', ask: 'Ask (Q&A)', assistant: 'Get Vexo Assistant' };
+// saved key -> the settings.channels key the features read
+const FEATURE_OF = { games: 'general' };
 
-// the channel choices this server gets (keys tied to a switched-off flag are hidden)
-const channelKeys = (guildId) =>
-  guilds.isHome(guildId) ? Object.entries(HOME_CHANNEL_LABELS) : Object.entries(CHANNEL_KEYS).filter(([k]) => !setup.KEYS[k]?.flag || guilds.settings(guildId)[setup.KEYS[k].flag] === true);
-const labelOf = (guildId, key) => (guilds.isHome(guildId) ? HOME_CHANNEL_LABELS : CHANNEL_KEYS)[key] || key;
+// the channel choices (identical everywhere; a key tied to a switched-off flag is hidden)
+const channelKeys = (guildId) => Object.entries(CHANNEL_KEYS).filter(([k]) => !setup.KEYS[k]?.flag || guilds.settings(guildId)[setup.KEYS[k].flag] === true);
+const labelOf = (key) => CHANNEL_KEYS[key] || key;
 // Manage Server, or the boss of THIS server
 const isManager = (interaction) => !!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) || identity.isBoss(interaction.user, interaction);
 
+// the same summary in every server; HΛVØCZ also shows where each value comes from
 function summary(guildId) {
   const s = guilds.settings(guildId);
-  const c = s.channels;
-  const ch = (id) => (id ? `<#${id}>` : '*not set*');
-  return [
-    `Control: ${ch(c.control)} · Marketplace: ${ch(c.marketplace)} · Rumble: ${ch(c.rumble)}`,
-    `Number guess: ${ch(c.general)} · X posts: ${ch(c.xDrop)} · Giveaways: ${ch(c.giveaway)} · Logs: ${ch(c.logs)}`,
-    `NFT Radar: ${ch(c.nftRadar)} · SOL Radar: ${ch(c.solRadar)}${s.personalVexo ? ` · Get Vexo Assistant: ${ch(c.assistant)}` : ''}`,
-    `Game ping role: ${s.pingRoleId ? `<@&${s.pingRoleId}>` : '*none*'} · Boss: ${s.bossUserId ? `<@${s.bossUserId}>` : '*not set*'}`,
-    `Knowledge sources: ${s.knowledgeSources.length ? s.knowledgeSources.map(ch).join(', ') : '*none chosen*'}`,
-    `Ticket instructions: "${s.ticketInstructions}"`,
-  ].join('\n');
-}
-
-// HΛVØCZ: every channel with where it comes from
-function homeSummary(missing) {
-  const s = guilds.settings(guilds.homeId());
-  const src = guilds.homeChannelSources();
-  const tag = (x) => (x.from === 'setup' ? '(/setup)' : x.from === 'env' ? '(.env)' : '');
-  // the channel the feature really uses (same function as the features: never the shop for non-shop features)
+  const home = s.isHome;
+  const src = home ? guilds.homeChannelSources() : {};
+  const tag = (key) => (!home ? '' : src[key]?.from === 'setup' ? ' (/setup)' : src[key]?.from === 'env' ? ' (.env)' : '');
   const line = (k) => {
-    const key = guilds.HOME_CHANNEL_KEYS[k];
-    const id = guilds.getFeatureChannel(s, key);
-    return `${SHORT[k]}: ${id ? `<#${id}> ${tag(src[key])}` : '*not set*'}`;
+    const key = FEATURE_OF[k] || k;
+    const id = guilds.getFeatureChannel(s, key); // exactly the channel the feature uses
+    return `${SHORT[k]}: ${id ? `<#${id}>${tag(key)}` : '*not set*'}`;
   };
-  const keys = Object.keys(HOME_CHANNEL_LABELS);
+  const keys = channelKeys(guildId).map(([k]) => k);
   const rows = [];
   for (let i = 0; i < keys.length; i += 3) rows.push(keys.slice(i, i + 3).map(line).join(' · '));
-  if (!guilds.getFeatureChannel(s, 'logs')) rows.push('(No logs channel: choose one here or set LOGS_CHANNEL_ID. Until then feature logs and notices are not sent anywhere. Purchase records keep going to REDEEM_LOGS_CHANNEL_ID.)');
-  const saved = guilds.get(guilds.homeId())?.settings || {};
-  const roleFrom = typeof saved.pingRoleId === 'string' ? '(/setup)' : s.pingRoleId ? '(.env)' : '';
-  rows.push(`Game ping role: ${s.pingRoleId ? `<@&${s.pingRoleId}> ${roleFrom}` : '*none*'} · Boss: ${s.bossUserId ? `<@${s.bossUserId}>` : '*not set*'} (BOSS_USER_ID, not changed here)`);
-  rows.push(`Knowledge sources: ${s.knowledgeSources.length ? s.knowledgeSources.map((id) => `<#${id}>`).join(', ') : '*none chosen* (Vexo uses knowledge.md + what the boss teaches)'}`);
-  rows.push(missing.length ? `Missing channels: ${missing.map((k) => `**${SHORT[k]}**`).join(', ')} (press **Create missing channels** to make them)` : 'SOL Radar, NFT Radar and Giveaways all have a channel.');
+  const row = guilds.get(guildId);
+  const saved = row?.settings || {};
+  const roleFrom = home ? (typeof saved.pingRoleId === 'string' ? ' (/setup)' : s.pingRoleId ? ' (.env)' : '') : '';
+  const bossFrom = home ? (String(row?.boss_user_id || '').trim() ? ' (/setup)' : s.bossUserId ? ' (.env)' : '') : '';
+  rows.push(`Game ping role: ${s.pingRoleId ? `<@&${s.pingRoleId}>${roleFrom}` : '*none*'} · Boss: ${s.bossUserId ? `<@${s.bossUserId}>${bossFrom}` : '*not set*'}`);
+  rows.push(`Knowledge sources: ${s.knowledgeSources.length ? s.knowledgeSources.map((id) => `<#${id}>`).join(', ') : '*none chosen*'}`);
+  rows.push(`Ticket instructions: ${s.ticketInstructions ? `"${s.ticketInstructions}"` : home ? '*the usual HΛVØCZ ticket button (not changed)*' : '*not set*'}`);
+  if (!guilds.getFeatureChannel(s, 'logs')) rows.push(`(No logs channel: feature logs and notices are not sent anywhere${home ? '. Choose one here or set LOGS_CHANNEL_ID. Purchase records keep going to REDEEM_LOGS_CHANNEL_ID' : ''}.)`);
   return rows.join('\n');
 }
 
 function menuRow(guildId) {
-  const home = guilds.isHome(guildId);
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('setup:menu')
@@ -99,12 +77,8 @@ function menuRow(guildId) {
         ...channelKeys(guildId).map(([value, label]) => ({ label, value: `ch:${value}` })),
         { label: 'Role to ping for games', value: 'role' },
         { label: 'Knowledge source channels (announcements, roadmap, rules, FAQ...)', value: 'sources' },
-        ...(home
-          ? []
-          : [
-              { label: 'Boss (the admin Vexo obeys in the control channel)', value: 'boss' },
-              { label: 'Ticket instructions (how winners and buyers claim prizes)', value: 'ticket' },
-            ])
+        { label: 'Boss (the admin Vexo obeys in the control channel)', value: 'boss' },
+        { label: 'Ticket instructions (how winners and buyers claim prizes)', value: 'ticket' }
       )
   );
 }
@@ -115,31 +89,34 @@ const createRow = (missing) =>
 
 async function panel(guild, note = '') {
   const guildId = guild?.id || guilds.homeId();
-  if (guilds.isHome(guildId)) {
-    const missing = guild ? await setup.missingHome(guild) : [];
-    return {
-      content: `${note ? `${note}\n\n` : ''}**Vexo setup · home server**\nA channel chosen here is used instead of the .env value; everything else keeps its .env value. Nothing is created unless you press the button.\n${homeSummary(missing)}`.slice(0, 1950),
-      components: [menuRow(guildId), createRow(missing)],
-      allowedMentions: { parse: [] },
-    };
-  }
-  return { content: `${note ? `${note}\n\n` : ''}**Vexo setup**\n${summary(guildId)}\n\nPick something to change, or dismiss this message when you are done.`.slice(0, 1950), components: [menuRow(guildId)], allowedMentions: { parse: [] } };
+  const home = guilds.isHome(guildId);
+  const missing = home && guild ? await setup.missingHome(guild) : [];
+  const homeNote = home
+    ? `\nHome server: a value chosen here is used instead of the .env value; anything not chosen keeps its .env value. ${missing.length ? `Missing: ${missing.map((k) => `**${SHORT[k]}**`).join(', ')} (press **Create missing channels**).` : 'SOL Radar, NFT Radar and Giveaways all have a channel.'}`
+    : '';
+  return {
+    content: `${BUILD_LINE}\n${note ? `${note}\n\n` : ''}**Vexo setup**\n${summary(guildId)}${homeNote}\n\nPick something to change, or dismiss this message when you are done.`.slice(0, 1990),
+    components: home ? [menuRow(guildId), createRow(missing)] : [menuRow(guildId)],
+    allowedMentions: { parse: [] },
+  };
 }
 
 async function execute(interaction) {
-  if (!isManager(interaction)) return interaction.reply({ content: 'Only the boss or members with Manage Server can use /setup.', ...EPH });
+  if (!isManager(interaction)) return interaction.reply({ content: `${BUILD_LINE}\nOnly the boss or members with Manage Server can use /setup.`, ...EPH });
   await interaction.deferReply(EPH);
-  if (guilds.isHome(interaction)) return interaction.editReply(await panel(interaction.guild)); // nothing is created automatically here
-  if (!guilds.get(interaction)) await guilds.join(interaction.guild); // joined while the bot was offline
-  const res = await setup.ensureChannels(interaction.guild);
+  if (!guilds.get(interaction)) await guilds.join(interaction.guild); // joined while the bot was offline (HΛVØCZ: its row only)
   let note = '';
-  if (res.error === 'missing_permissions') note = setup.permissionHelp(res.missing);
-  else if (res.error) note = `⚠️ Setup hit a problem: ${res.error}. Try /setup again.`;
-  else {
-    note = res.created.length ? `✅ Created: ${res.created.map((k) => `**${setup.KEYS[k].name}**`).join(', ')}.` : '✅ Everything is in place, nothing new was created.';
-    if (res.missing.length) note += `\n⚠️ Still missing permissions: **${res.missing.join(', ')}** (some features will not work until my role has them).`;
-    if (res.created.includes('marketplace') && plans.hasFeature(interaction, 'marketplace')) {
-      await require('../marketplace').ensureHeader(interaction.client, interaction.guildId).catch(() => {});
+  // customer servers: the automatic setup makes what is missing. HΛVØCZ: nothing automatic (the button does it).
+  if (!guilds.isHome(interaction)) {
+    const res = await setup.ensureChannels(interaction.guild);
+    if (res.error === 'missing_permissions') note = setup.permissionHelp(res.missing);
+    else if (res.error) note = `⚠️ Setup hit a problem: ${res.error}. Try /setup again.`;
+    else {
+      note = res.created.length ? `✅ Created: ${res.created.map((k) => `**${setup.KEYS[k].name}**`).join(', ')}.` : '✅ Everything is in place, nothing new was created.';
+      if (res.missing.length) note += `\n⚠️ Still missing permissions: **${res.missing.join(', ')}** (some features will not work until my role has them).`;
+      if (res.created.includes('marketplace') && plans.hasFeature(interaction, 'marketplace')) {
+        await require('../marketplace').ensureHeader(interaction.client, interaction.guildId).catch(() => {});
+      }
     }
   }
   return interaction.editReply(await panel(interaction.guild, note));
@@ -147,12 +124,12 @@ async function execute(interaction) {
 
 // every component / modal whose customId starts with "setup:" (routed from interactionCreate)
 async function handleComponent(interaction) {
-  if (!isManager(interaction)) return interaction.reply({ content: 'Only the boss or members with Manage Server can do this.', ...EPH });
+  if (!isManager(interaction)) return interaction.reply({ content: `${BUILD_LINE}\nOnly the boss or members with Manage Server can do this.`, ...EPH });
   const guildId = interaction.guildId;
   const home = guilds.isHome(guildId);
   const [, kind, key] = interaction.customId.split(':');
   const textTypes = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
-  const withMenu = (content, row) => interaction.update({ content, components: [row, menuRow(guildId)], allowedMentions: { parse: [] } });
+  const withMenu = (content, row) => interaction.update({ content: `${BUILD_LINE}\n${content}`, components: [row, menuRow(guildId)], allowedMentions: { parse: [] } });
   const show = async (note = '') => interaction.update(await panel(interaction.guild, note));
 
   // ---- HΛVØCZ: the "Create missing channels" button (the only way channels are ever made there)
@@ -168,28 +145,28 @@ async function handleComponent(interaction) {
     return interaction.editReply(await panel(interaction.guild, note));
   }
 
-  // ---- the main menu: show the matching picker
+  // ---- the main menu: show the matching picker (the same in every server)
   if (kind === 'menu') {
     const pick = interaction.values[0];
     if (pick.startsWith('ch:')) {
       const k = pick.slice(3);
       const picker = new ChannelSelectMenuBuilder().setCustomId(`setup:ch:${k}`).setChannelTypes(ChannelType.GuildText).setPlaceholder('Choose a channel');
-      if (home) picker.setMinValues(0).setMaxValues(1); // choose none = use the .env value again
-      return withMenu(`Choose the channel to use as: **${labelOf(guildId, k)}**${home ? '\n(Choose none to go back to the .env value.)' : ''}`, new ActionRowBuilder().addComponents(picker));
+      if (home) picker.setMinValues(0).setMaxValues(1); // HΛVØCZ: choose none = use the .env value again
+      return withMenu(`Choose the channel to use as: **${labelOf(k)}**${home ? '\n(Choose none to go back to the .env value.)' : ''}`, new ActionRowBuilder().addComponents(picker));
     }
     if (pick === 'role') return withMenu('Choose the role I ping when a game opens (choose none to ping nobody).', new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup:role').setMinValues(0).setMaxValues(1).setPlaceholder('Choose a role')));
     if (pick === 'sources') return withMenu(`Choose the channels I should learn from (announcements, roadmap, lore, rules, FAQ...). I read their history once and keep learning from new posts. I never learn from normal chat channels unless you pick them here.${home ? ' In this server they are learned into a separate sheet: knowledge.md and the facts the boss taught are never changed.' : ''}`, new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup:sources').setChannelTypes(...textTypes).setMinValues(0).setMaxValues(10).setPlaceholder('Choose up to 10 channels')));
-    if (pick === 'boss' && !home) return withMenu('Choose the admin I call "boss" and obey in the control channel.', new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId('setup:boss').setPlaceholder('Choose a member')));
-    if (pick === 'ticket' && !home) {
-      const input = new TextInputBuilder().setCustomId('text').setLabel('What should winners and buyers do?').setStyle(TextInputStyle.Paragraph).setMaxLength(300).setRequired(true).setValue(guilds.settings(guildId).ticketInstructions.slice(0, 300));
+    if (pick === 'boss') return withMenu('Choose the admin I call "boss" and obey in the control channel.', new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId('setup:boss').setPlaceholder('Choose a member')));
+    if (pick === 'ticket') {
+      const current = guilds.settings(guildId).ticketInstructions || guilds.DEFAULT_TICKET_TEXT;
+      const input = new TextInputBuilder().setCustomId('text').setLabel('What should winners and buyers do?').setStyle(TextInputStyle.Paragraph).setMaxLength(300).setRequired(true).setValue(current.slice(0, 300));
       return interaction.showModal(new ModalBuilder().setCustomId('setup:ticketmodal').setTitle('Ticket instructions').addComponents(new ActionRowBuilder().addComponents(input)));
     }
     return show();
   }
 
-  // ---- a picker was used: save
+  // ---- a picker was used: save (the same saving in every server: this server's guilds row)
   if (kind === 'ticketmodal') {
-    if (home) return show();
     const text = interaction.fields.getTextInputValue('text').replace(/@(everyone|here)/gi, '').replace(/\s+/g, ' ').trim().slice(0, 300);
     await guilds.update(guildId, { ticket_instructions: text || guilds.DEFAULT_TICKET_TEXT });
     return show('✅ Ticket instructions saved.');
@@ -200,12 +177,12 @@ async function handleComponent(interaction) {
     if (!id) {
       if (!home) return show();
       await guilds.patchSettings(guildId, { channels: { [key]: '' } });
-      return show(`✅ ${labelOf(guildId, key)}: back to the .env value.`);
+      return show(`✅ ${labelOf(key)}: back to the .env value.`);
     }
     // only shop content goes to the shop: no other feature may use the marketplace channel
     const c = guilds.settings(guildId).channels;
     if (key !== 'marketplace' && id === c.marketplace) {
-      return show(`⚠️ <#${id}> is the marketplace (shop) channel. Only shop content goes there, so it cannot also be the ${labelOf(guildId, key)}. Choose a different channel.`);
+      return show(`⚠️ <#${id}> is the marketplace (shop) channel. Only shop content goes there, so it cannot also be the ${labelOf(key)}. Choose a different channel.`);
     }
     if (key === 'marketplace' && id === c.logs) {
       return show('⚠️ The logs channel and the marketplace (shop) channel must be different channels. Logs never go to the shop.');
@@ -218,7 +195,7 @@ async function handleComponent(interaction) {
     }
     await guilds.patchSettings(guildId, { channels: { [key]: id } });
     if (key === 'marketplace' && plans.hasFeature(guildId, 'marketplace')) await require('../marketplace').ensureHeader(interaction.client, guildId).catch(() => {});
-    return show(`✅ ${labelOf(guildId, key)} is now <#${id}>.`);
+    return show(`✅ ${labelOf(key)} is now <#${id}>.`);
   }
   if (kind === 'role') {
     const id = interaction.values[0] || '';
@@ -226,7 +203,6 @@ async function handleComponent(interaction) {
     return show(id ? `✅ I will ping <@&${id}> for games. (The role must be mentionable, or my role needs "Mention @everyone, @here and All Roles".)` : '✅ I will not ping any role for games.');
   }
   if (kind === 'boss') {
-    if (home) return show();
     const id = interaction.values[0];
     if (interaction.users?.get(id)?.bot) return show('⚠️ A bot cannot be the boss. Choose a member.');
     await guilds.update(guildId, { boss_user_id: id });
@@ -259,4 +235,5 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   execute,
   handleComponent,
+  CHANNEL_KEYS,
 };

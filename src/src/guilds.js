@@ -51,6 +51,7 @@ const HOME_CHANNEL_KEYS = {
   solRadar: 'solRadar',
   welcome: 'welcome',
   ask: 'ask',
+  assistant: 'assistant', // get-vexo-assistant (VEXO_ASSISTANT_CHANNEL_ID)
 };
 // the HΛVØCZ channels from .env alone
 function homeEnvChannels() {
@@ -89,7 +90,8 @@ function homeSettings() {
     known: true,
     name: config.homeGuildName, // fixed spelling for Vexo's prompts (never the live Discord server name)
     channels: { ...homeEnvChannels(), ...homeChosen(row) }, // /setup first, then .env
-    bossUserId: config.bossUserId,
+    // the boss: chosen in /setup (guilds.boss_user_id, never set automatically for HΛVØCZ), else BOSS_USER_ID
+    bossUserId: String(row?.boss_user_id || '').trim() || config.bossUserId,
     staffRoleIds: config.staffRoleIds,
     adminRoleId: config.adminRoleId,
     verifiedRoleId: config.verifiedRoleId, // points eligibility + Rumble join rule (always .env)
@@ -97,7 +99,8 @@ function homeSettings() {
     requireVerified: config.rumble.requireVerified,
     chatChannelIds: config.chatChannelIds,
     excludedChannels: config.filters.excludedChannels,
-    ticketInstructions: null, // null = keep the existing HΛVØCZ wording everywhere
+    // ticket text chosen in /setup; null = the existing HΛVØCZ wording (the column's default text counts as "not chosen")
+    ticketInstructions: (row?.ticket_instructions || '').trim() && row.ticket_instructions.trim() !== DEFAULT_TICKET_TEXT ? row.ticket_instructions.trim() : null,
     knowledgeSources: Array.isArray(s.knowledgeSources) ? s.knowledgeSources.map(String) : [], // learned into a SEPARATE sheet (learn.js)
     automod: row?.settings?.automod || {}, // every rule OFF unless switched on with /automod
     scam: row?.settings?.scam || {}, // scam protection: OFF here until switched on with /automod scam
@@ -116,13 +119,13 @@ function otherSettings(id) {
     known: !!row && row.status !== 'left',
     name: row?.name || 'this server',
     channels: {
-      ask: '',
+      ask: ch.ask || '', // Q&A channel chosen in /setup (empty = no dedicated Q&A channel)
       general: ch.games || ch.rumble || '', // number guess + daily top chatter
       marketplace: ch.marketplace || '',
       redeemLogs: ch.logs || '',
       receipts: '',
       ticketCategory: '',
-      welcome: '',
+      welcome: ch.welcome || '', // new-member welcome channel chosen in /setup (empty = no welcomes)
       rules: '',
       control: ch.control || '',
       ticket: '',

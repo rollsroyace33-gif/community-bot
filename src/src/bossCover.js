@@ -55,7 +55,7 @@ function channelNotes(channelId) {
 }
 
 // ---------------- helpers ----------------
-const bossId = () => config.bossUserId;
+const bossId = () => guilds.settings(guilds.homeId()).bossUserId; // HΛVØCZ boss: /setup first, then BOSS_USER_ID
 const allowNone = { repliedUser: false, parse: [] };
 
 function isTicketChannel(message) {
