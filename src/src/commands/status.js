@@ -44,7 +44,7 @@ module.exports = {
     const src = s.isHome ? guilds.homeChannelSources() : {};
     // each feature's channel exactly as the feature itself gets it (not set = that feature posts nothing)
     const f = (key) => guilds.getFeatureChannel(s, key);
-    const from = (key) => (!s.isHome || !f(key) ? '' : src[key]?.from === 'setup' ? ' · from /setup' : src[key]?.from === 'env' ? ` · from .env${key === 'logs' ? ' (REDEEM_LOGS_CHANNEL_ID)' : ''}` : '');
+    const from = (key) => (!s.isHome || !f(key) ? '' : src[key]?.from === 'setup' ? ' · from /setup' : src[key]?.from === 'env' ? ` · from .env${key === 'logs' ? ' (LOGS_CHANNEL_ID)' : ''}` : '');
     const solRadar = require('../solRadar');
     const solRadarNote = solRadar.blocker(s.guildId) ? 'not posting, see /solradar status' : `${solRadar.settingsOf(s.guildId).times.length} updates a day`;
     const channels = [
@@ -88,6 +88,7 @@ module.exports = {
     } catch {}
     if (!s.isHome) embed.addFields({ name: 'AI calls today', value: `${row?.ai_calls_today ?? 0} of ${config.defaultDailyAiLimit}`, inline: true });
     if (!s.isHome && !p.premium && config.supportContact) embed.addFields({ name: 'Unlock premium', value: config.supportContact.slice(0, 1000) });
+    embed.setFooter({ text: `build: ${require('../build').BUILD}` }); // which upload is live
     return interaction.reply({ embeds: [embed], allowedMentions: { parse: [] }, ...eph });
   },
 };

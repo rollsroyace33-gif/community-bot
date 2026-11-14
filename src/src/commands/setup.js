@@ -71,14 +71,16 @@ function homeSummary(missing) {
   const s = guilds.settings(guilds.homeId());
   const src = guilds.homeChannelSources();
   const tag = (x) => (x.from === 'setup' ? '(/setup)' : x.from === 'env' ? '(.env)' : '');
+  // the channel the feature really uses (same function as the features: never the shop for non-shop features)
   const line = (k) => {
-    const x = src[guilds.HOME_CHANNEL_KEYS[k]];
-    return `${SHORT[k]}: ${x.id ? `<#${x.id}> ${tag(x)}` : '*not set*'}`;
+    const key = guilds.HOME_CHANNEL_KEYS[k];
+    const id = guilds.getFeatureChannel(s, key);
+    return `${SHORT[k]}: ${id ? `<#${id}> ${tag(src[key])}` : '*not set*'}`;
   };
   const keys = Object.keys(HOME_CHANNEL_LABELS);
   const rows = [];
   for (let i = 0; i < keys.length; i += 3) rows.push(keys.slice(i, i + 3).map(line).join(' · '));
-  if (!src.logs.id && s.channels.redeemLogs) rows.push(`(REDEEM_LOGS_CHANNEL_ID is the shop channel, so it is not used for logs. Choose a logs channel: until then feature logs are not sent.)`);
+  if (!guilds.getFeatureChannel(s, 'logs')) rows.push('(No logs channel: choose one here or set LOGS_CHANNEL_ID. Until then feature logs and notices are not sent anywhere. Purchase records keep going to REDEEM_LOGS_CHANNEL_ID.)');
   const saved = guilds.get(guilds.homeId())?.settings || {};
   const roleFrom = typeof saved.pingRoleId === 'string' ? '(/setup)' : s.pingRoleId ? '(.env)' : '';
   rows.push(`Game ping role: ${s.pingRoleId ? `<@&${s.pingRoleId}> ${roleFrom}` : '*none*'} · Boss: ${s.bossUserId ? `<@${s.bossUserId}>` : '*not set*'} (BOSS_USER_ID, not changed here)`);

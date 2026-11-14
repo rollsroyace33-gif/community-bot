@@ -700,5 +700,5 @@ module.exports = {
   handleDeliver,
   refundPurchase,
   points,
-  _test: { buying, boughtOn, receipts, shopPage, itemDetail, PAGE_SIZE },
+  _test: { buying, boughtOn, receipts, shopPage, itemDetail, PAGE_SIZE, sendLog },
 };

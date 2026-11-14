@@ -98,6 +98,7 @@ client.on(Events.Debug, (m) => {
 client.once(Events.ClientReady, async (c) => {
   ready = true;
   console.log(`[startup] step: READY, logged in as ${c.user.tag} (${c.user.id}), in ${c.guilds.cache.size} guild(s)`);
+  console.log(`Logged in as ${c.user.tag} build: ${require('./build').BUILD}`);
 
   // ---- multi-server: load every server's row BEFORE anything reads settings (HΛVØCZ works from .env
   // even if this fails), make sure every server the bot is in has a row, import knowledge.md once

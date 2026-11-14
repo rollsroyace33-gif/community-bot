@@ -55,11 +55,12 @@ const HOME_CHANNEL_KEYS = {
 // the HΛVØCZ channels from .env alone
 function homeEnvChannels() {
   return {
-    ...config.channels, // ask, general, marketplace, redeemLogs, receipts, ticketCategory, welcome, rules, control, ticket, giveaway, nftRadar, solRadar, assistant
+    ...config.channels, // ask, general, marketplace, redeemLogs, logs, receipts, ticketCategory, welcome, rules, control, ticket, giveaway, nftRadar, solRadar, assistant
     rumble: config.rumble.channelId,
     xDrop: config.xDrop.channelId,
-    // no own .env variable: REDEEM_LOGS_CHANNEL_ID is the .env fallback, but NEVER when it is the shop channel
-    logs: config.channels.redeemLogs && config.channels.redeemLogs !== config.channels.marketplace ? config.channels.redeemLogs : '',
+    // feature logs: LOGS_CHANNEL_ID (never REDEEM_LOGS_CHANNEL_ID, which is for purchase records only).
+    // getFeatureChannel() also refuses it when it is the shop channel.
+    logs: config.channels.logs || '',
   };
 }
 // the HΛVØCZ channels chosen in /setup ({ channels key: id }); empty values = not chosen

@@ -123,7 +123,7 @@ function settingsOf(guildId) {
 async function saveSettings(guildId, patch) {
   return guilds.patchSettings(guildId, { nftRadar: { ...settingsOf(guildId), ...patch } });
 }
-const logsChannelId = (s) => guilds.logsChannelId(s); // logs channel, else REDEEM_LOGS / control; never the shop
+const logsChannelId = (s) => guilds.logsChannelId(s); // the logs channel only (no fallback); never the shop
 
 function blocker(guildId) {
   const s = guilds.settings(guildId);

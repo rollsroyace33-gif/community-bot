@@ -27,7 +27,10 @@ module.exports = {
     ask: process.env.ASK_CHANNEL_ID || '',
     general: process.env.GENERAL_CHANNEL_ID || '',
     marketplace: process.env.MARKETPLACE_CHANNEL_ID || '',
-    redeemLogs: process.env.REDEEM_LOGS_CHANNEL_ID || '',
+    redeemLogs: process.env.REDEEM_LOGS_CHANNEL_ID || '', // purchase records ONLY (shop content); never feature logs
+    // HΛVØCZ's private logs channel for feature logs and notices (SOL / NFT Radar, approvals, giveaways, auto mod,
+    // scam alerts, settings changes). /setup can choose it too (that choice wins). Empty + nothing chosen = not sent.
+    logs: (process.env.LOGS_CHANNEL_ID || '').trim(),
     receipts: (process.env.RECEIPT_CHANNEL_ID || '').trim(), // staff copy of every shop receipt (empty = skipped)
     ticketCategory: process.env.TICKET_CATEGORY_ID || '',
     welcome: process.env.WELCOME_CHANNEL_ID || '',
