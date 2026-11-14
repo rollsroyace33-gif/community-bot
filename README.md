@@ -494,12 +494,15 @@ Database: after `migration_giveaway.sql`, run `supabase/migration_radar.sql` (re
   number guess, X posts, giveaways, NFT Radar, SOL Radar, welcome, ask; the game ping role; knowledge source channels.
 - Priority: a channel chosen in `/setup` (saved in the HΛVØCZ guilds row) wins; everything not chosen keeps its
   `.env` value. "Choose none" in a picker goes back to the `.env` value. A deleted `/setup` channel falls back to `.env`.
-- **Create missing channels** button: creates (or reuses by name, never duplicates) only channels that have no
-  `/setup` and no `.env` value. Nothing is ever created in HΛVØCZ automatically (startup, join).
+- **Create missing channels** button: creates (or reuses by name, never duplicates, never changes) only the
+  SOL Radar, NFT Radar and giveaways channels when they have no `/setup` and no `.env` value, and replies with links.
+  Nothing is ever created in HΛVØCZ automatically (startup, join).
 - Not changed in HΛVØCZ: the boss (`BOSS_USER_ID`), the ticket text, all features always on, points / Rumble role
   rule (`VERIFIED_ROLE_ID`).
 - Knowledge source channels in HΛVØCZ are learned into a separate sheet; `knowledge.md` and taught facts are never
   rewritten.
 - Feature logs (SOL / NFT Radar, giveaways, auto mod, scam alerts) go to: the logs channel, else
-  `REDEEM_LOGS_CHANNEL_ID`, else the control channel; never the marketplace channel. Purchase logs are unchanged.
+  `LOGS_CHANNEL_ID` (HΛVØCZ, when no logs channel is chosen in `/setup`). No fallback: no logs channel = not sent.
+  Never the marketplace channel. `REDEEM_LOGS_CHANNEL_ID` is for purchase records only.
+- Build marker: `src/build.js` (`BUILD`), printed at startup ("Logged in as ... build: ...") and at the bottom of `/status`.
 - `/status` shows for each HΛVØCZ channel whether it comes from `/setup` or `.env`. Tests: `npm run test:home`.

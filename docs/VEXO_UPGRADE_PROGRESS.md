@@ -56,9 +56,22 @@ On "resume": read the spec, read this file, run the syntax check and `npm test`,
 - Not tested for real: Discord buttons in a real server, the real AI research answer quality. Tavily itself was checked live (works).
 - Exact next action for Claude: WAIT. Fix only what the owner reports. When the owner says NFT Radar works, mark phase 3 DONE. Next planned phase: 5 (Full Web3 AI assistant), only after the owner's written OK.
 
-## Extra request 2 (2026-11-14): home channels, round 2 — IN PROGRESS
+## Extra request 3 (2026-11-15): finish + prove + build marker — BUILT, WAITING FOR MY TEST (not deployed)
 
-- Owner still sees "nothing to set up" + "SOL_RADAR_CHANNEL_ID is empty" + a "SOL Radar settings" log in the shop: these texts exist only in the OLD code (backups/before-home-setup); the new files were not deployed. Root cause of the shop log: old code sent HΛVØCZ feature logs to `logs || REDEEM_LOGS_CHANNEL_ID`, and home `logs` was always empty, so REDEEM_LOGS_CHANNEL_ID (which must point at the shop channel) got them.
+- Owner: only marketplace content may use REDEEM_LOGS_CHANNEL_ID; add BUILD = "home-setup-v2" (startup log + bottom of /status); prove with searches; upload list vs backups/before-home-setup-2; no deploy.
+- Findings: round 2 code was complete (R.1-R.5). Still wrong: (a) HΛVØCZ feature logs used REDEEM_LOGS_CHANNEL_ID as .env fallback -> replace by a NEW variable LOGS_CHANNEL_ID (decision Q5); (b) /setup panel showed the raw .env logs id (could show the shop) -> use getFeatureChannel; (c) README line + nftRadar.js comment still said "else REDEEM_LOGS / control".
+- Steps: B.1 LOGS_CHANNEL_ID (config.js, guilds.js, .env.example, setup panel, status label) · B.2 build marker (src/build.js, index.js, commands/status.js) · B.3 texts (README, nftRadar.js comment) · B.4 tests · B.5 upload list.
+- B.1 DONE: `LOGS_CHANNEL_ID` in src/config.js (config.channels.logs), src/guilds.js (home logs .env fallback = LOGS_CHANNEL_ID; REDEEM_LOGS no longer used for feature logs), .env.example, src/commands/setup.js (panel uses getFeatureChannel for every line + logs hint), src/commands/status.js label, src/nftRadar.js comment.
+- B.2 DONE: new src/build.js (BUILD = "home-setup-v2"); src/index.js prints "Logged in as <tag> build: home-setup-v2"; src/commands/status.js footer "build: home-setup-v2".
+- B.3 DONE: README (logs rule, button, build marker), nftRadar.js comment.
+- B.4 DONE: tests giveaway / solradar / nftradar get LOGS_CHANNEL_ID in their fake env; home-setup: separate purchase-log channel, tests for "never REDEEM_LOGS / control / shop", "purchase records are the only REDEEM_LOGS user", build marker in /status (16 pass). marketplace.js: sendLog exposed on `_test` only. Syntax check 102 files OK; `npm test` all pass; shop 15, boss-gate 31, rumble-order 24.
+- Proof searches (excl. backups, node_modules, .env): "nothing to set up" = 0 matches (one history line in this file reworded). REDEEM_LOGS_CHANNEL_ID in code only in config.js (purchase records) + comments / hints; `redeemLogs` is sent to only by marketplace.js (purchase log + ticket transcript). logsChannelId = getFeatureChannel(x, 'logs') everywhere.
+- B.5 DONE: upload list. vs backups/before-home-setup-2: NEW src/build.js, src/notices.js; CHANGED src/ bossCover, config, giveaway, guilds, index, marketplace, nftRadar, scam, setup, solRadar, xDrop; src/commands/ guess, setup, status; src/events/guildMemberAdd; src/jobs/daily; src/tasks/control, rumbleRoyale; tests/ giveaway, home-setup, nftradar, solradar; root .env.example, README.md; docs/VEXO_UPGRADE_PROGRESS.md. package.json / package-lock.json NOT changed since that backup. Nothing to delete on GitHub. WARNING: round 1 (before that backup) was never deployed either: also needed src/ai.js, learn.js, automod.js, offlineChat.js, commands/knowledge.js, commands/nftradar.js, commands/solradar.js, tasks/scheduler.js and package.json -> advice: upload the whole src/ and tests/ folders.
+- RESULT: BUILT, WAITING FOR MY TEST. Not deployed. SQL: none. New Render variable: LOGS_CHANNEL_ID (HΛVØCZ private logs channel, NOT the shop). Live: until LOGS_CHANNEL_ID is set or a logs channel is chosen in /setup, HΛVØCZ feature logs are not sent (purchase records unchanged).
+
+## Extra request 2 (2026-11-14): home channels, round 2 — BUILT (R.1-R.5 done), WAITING FOR MY TEST
+
+- Owner still sees the old "home server, no setup" refusal + "SOL_RADAR_CHANNEL_ID is empty" + a "SOL Radar settings" log in the shop: these texts exist only in the OLD code (backups/before-home-setup); the new files were not deployed. Root cause of the shop log: old code sent HΛVØCZ feature logs to `logs || REDEEM_LOGS_CHANNEL_ID`, and home `logs` was always empty, so REDEEM_LOGS_CHANNEL_ID (which must point at the shop channel) got them.
 - New rules from the owner: one `getFeatureChannel(guildId, feature)`; a feature with no channel never falls back to another channel (logs: no control fallback any more), skips, /status "not set", boss told once in vexo-logs; Create button makes only sol-radar, nft-radar, giveaways and replies with links; tests: no-channel posts nowhere, nothing but shop content reaches the shop, home /setup saves + reads, button no duplicate.
 - R.1 DONE: backup `backups/before-home-setup-2/` (no .env).
 - R.2 DONE: `src/guilds.js` `getFeatureChannel(x, feature)` (/setup, else .env for HΛVØCZ, else ''; never the shop for non-shop features); `logsChannelId` = logs only (no control fallback); HΛVØCZ logs .env fallback = REDEEM_LOGS_CHANNEL_ID unless it is the shop. Features switched to it: rumbleRoyale.js, xDrop.js, jobs/daily.js, commands/guess.js, tasks/control.js, giveaway.js, solRadar.js, nftRadar.js, events/guildMemberAdd.js, bossCover.js (ticket / control). scam.js: logs only (control fallback removed).
@@ -241,7 +254,7 @@ Planned, not added yet:
 
 - Phase 5: `HELIUS_API_KEY`
 - Phase 6: `PERSONAL_DAILY_AI_LIMIT`
-- Possibly `LOGS_CHANNEL_ID` for HΛVØCZ (depends on question 5)
+- (added 2026-11-15) `LOGS_CHANNEL_ID`: HΛVØCZ private logs channel for feature logs (never the shop); /setup can choose it instead.
 
 ## Decisions made
 

@@ -14,7 +14,7 @@ const U = (n) => `5000000000000000${String(n).padStart(2, '0')}`; // members
 Object.assign(process.env, {
   DISCORD_TOKEN: 'x', CLIENT_ID: 'x', GUILD_ID: HOME, HOME_GUILD_ID: HOME, OWNER_ID: REMO, SUPABASE_URL: 'http://fake', SUPABASE_SERVICE_KEY: 'x',
   AI_PROVIDER: 'openai', OPENAI_API_KEY: 'x', BOSS_USER_ID: REMO, STAFF_ROLE_IDS: '', TRIAL_DAYS: '15', DEFAULT_DAILY_AI_LIMIT: '50',
-  SUPPORT_CONTACT: 'Contact remo.sol to pay.', CONTROL_CHANNEL_ID: 'home-ctl', GENERAL_CHANNEL_ID: 'home-general', REDEEM_LOGS_CHANNEL_ID: 'home-logs',
+  SUPPORT_CONTACT: 'Contact remo.sol to pay.', CONTROL_CHANNEL_ID: 'home-ctl', GENERAL_CHANNEL_ID: 'home-general', REDEEM_LOGS_CHANNEL_ID: 'home-logs', LOGS_CHANNEL_ID: 'home-logs',
   GIVEAWAY_CHANNEL_ID: 'home-gw', TICKET_CHANNEL_ID: 'home-ticket', TIMEZONE: 'Asia/Dhaka', BOSS_TIMEZONE: 'Asia/Dhaka', ADMIN_ROLE_ID: '', VERIFIED_ROLE_ID: 'home-verified',
 });
 const src = (p) => require.resolve(`../src/${p}`);

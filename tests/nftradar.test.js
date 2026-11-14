@@ -14,7 +14,7 @@ const BOT = '999999999999999999';
 Object.assign(process.env, {
   DISCORD_TOKEN: 'x', CLIENT_ID: 'x', GUILD_ID: HOME, HOME_GUILD_ID: HOME, OWNER_ID: REMO, SUPABASE_URL: 'http://fake', SUPABASE_SERVICE_KEY: 'x',
   AI_PROVIDER: 'openai', OPENAI_API_KEY: 'x', BOSS_USER_ID: REMO, TRIAL_DAYS: '15', DEFAULT_DAILY_AI_LIMIT: '50', CONTROL_CHANNEL_ID: 'home-ctl',
-  REDEEM_LOGS_CHANNEL_ID: 'home-logs', NFT_RADAR_CHANNEL_ID: 'home-nft', SOL_RADAR_CHANNEL_ID: '', TAVILY_API_KEY: 'tvly-test', NFT_RADAR_TIMES: '09:00,21:00', TIMEZONE: 'Asia/Dhaka',
+  REDEEM_LOGS_CHANNEL_ID: 'home-logs', LOGS_CHANNEL_ID: 'home-logs', NFT_RADAR_CHANNEL_ID: 'home-nft', SOL_RADAR_CHANNEL_ID: '', TAVILY_API_KEY: 'tvly-test', NFT_RADAR_TIMES: '09:00,21:00', TIMEZONE: 'Asia/Dhaka',
 });
 const src = (p) => require.resolve(`../src/${p}`);
 

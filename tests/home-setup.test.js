@@ -14,7 +14,7 @@ const BOT = '999999999999999999';
 Object.assign(process.env, {
   DISCORD_TOKEN: 'x', CLIENT_ID: 'x', GUILD_ID: HOME, HOME_GUILD_ID: HOME, OWNER_ID: REMO, SUPABASE_URL: 'http://fake', SUPABASE_SERVICE_KEY: 'x',
   AI_PROVIDER: 'openai', OPENAI_API_KEY: 'x', BOSS_USER_ID: REMO, TRIAL_DAYS: '15', TIMEZONE: 'Asia/Dhaka',
-  CONTROL_CHANNEL_ID: 'home-ctl', REDEEM_LOGS_CHANNEL_ID: 'home-logs', MARKETPLACE_CHANNEL_ID: 'home-shop', GENERAL_CHANNEL_ID: 'home-gen',
+  CONTROL_CHANNEL_ID: 'home-ctl', REDEEM_LOGS_CHANNEL_ID: 'home-purchases', LOGS_CHANNEL_ID: 'home-logs', MARKETPLACE_CHANNEL_ID: 'home-shop', GENERAL_CHANNEL_ID: 'home-gen',
   WELCOME_CHANNEL_ID: 'home-welcome', ASK_CHANNEL_ID: 'home-ask', VERIFIED_ROLE_ID: 'role-verified', RUMBLE_CHANNEL_ID: 'home-rumble',
   X_DROP_CHANNEL_ID: '', GIVEAWAY_CHANNEL_ID: '', NFT_RADAR_CHANNEL_ID: '', SOL_RADAR_CHANNEL_ID: '',
 });
@@ -88,7 +88,7 @@ function fakeGuild(id, { manageChannels = true } = {}) {
   return guild;
 }
 const homeGuild = fakeGuild(HOME);
-for (const [cid, name] of [['home-ctl', 'vexo-control'], ['home-logs', 'purchase-logs'], ['home-shop', 'marketplace'], ['home-gen', 'general'], ['home-welcome', 'welcome'], ['home-ask', 'ask'], ['home-rumble', 'rumble'], ['home-announce', 'announcements'], ['home-other', 'other']]) homeGuild.add({ id: cid, name });
+for (const [cid, name] of [['home-ctl', 'vexo-control'], ['home-logs', 'vexo-logs'], ['home-purchases', 'purchase-logs'], ['home-shop', 'marketplace'], ['home-gen', 'general'], ['home-welcome', 'welcome'], ['home-ask', 'ask'], ['home-rumble', 'rumble'], ['home-announce', 'announcements'], ['home-other', 'other']]) homeGuild.add({ id: cid, name });
 const client = { user: { id: BOT }, channels: { fetch: async (cid) => homeGuild.channels.cache.get(cid) || null }, guilds: { cache: new Map([[HOME, homeGuild]]) } };
 homeGuild.client = client;
 
@@ -153,19 +153,19 @@ async function resetHome(settings = {}) {
     await resetHome();
     const s = guilds.settings(HOME);
     assert.equal(s.channels.control, 'home-ctl');
-    assert.equal(s.channels.redeemLogs, 'home-logs');
+    assert.equal(s.channels.redeemLogs, 'home-purchases');
     assert.equal(s.channels.marketplace, 'home-shop');
     assert.equal(s.channels.general, 'home-gen');
     assert.equal(s.channels.welcome, 'home-welcome');
     assert.equal(s.channels.rumble, 'home-rumble');
-    assert.equal(s.channels.logs, 'home-logs', 'logs: .env fallback is REDEEM_LOGS_CHANNEL_ID (it is not the shop here)');
+    assert.equal(s.channels.logs, 'home-logs', 'logs: .env fallback is LOGS_CHANNEL_ID');
     assert.equal(s.channels.solRadar, '');
     assert.equal(s.pingRoleId, 'role-verified');
     assert.equal(s.verifiedRoleId, 'role-verified');
     assert.equal(s.bossUserId, REMO);
     assert.deepEqual(s.knowledgeSources, []);
     assert.equal(ai.getKnowledge(HOME), 'MAIN SHEET from knowledge.md');
-    assert.equal(guilds.logsChannelId(HOME), 'home-logs', 'feature logs still use REDEEM_LOGS_CHANNEL_ID');
+    assert.equal(guilds.logsChannelId(HOME), 'home-logs', 'feature logs use LOGS_CHANNEL_ID, never REDEEM_LOGS_CHANNEL_ID');
   });
 
   await test('startup and joins never create anything in HΛVØCZ (only the button does)', async () => {
@@ -271,17 +271,20 @@ async function resetHome(settings = {}) {
   });
 
   say('== 3. Feature logs never go to the shop ==');
-  await test('logs: the /setup logs channel, else REDEEM_LOGS (HΛVØCZ); no fallback to control; never the shop', async () => {
+  await test('logs: the /setup logs channel, else LOGS_CHANNEL_ID (HΛVØCZ); never REDEEM_LOGS, control or the shop', async () => {
     await resetHome();
     assert.equal(guilds.logsChannelId(HOME), 'home-logs');
     await resetHome({ channels: { logs: 'home-other' } });
     assert.equal(guilds.logsChannelId(HOME), 'home-other');
-    // REDEEM_LOGS_CHANNEL_ID pointing at the shop (the live HΛVØCZ situation): feature logs are NOT sent anywhere
+    // no LOGS_CHANNEL_ID and nothing chosen: feature logs are NOT sent anywhere (REDEEM_LOGS is purchases only)
     await resetHome();
-    const saved = config.channels.redeemLogs;
-    config.channels.redeemLogs = 'home-shop';
-    assert.equal(guilds.logsChannelId(HOME), '', 'not the shop, and not the control channel either');
-    config.channels.redeemLogs = saved;
+    const saved = config.channels.logs;
+    config.channels.logs = '';
+    assert.equal(guilds.logsChannelId(HOME), '', 'not REDEEM_LOGS_CHANNEL_ID, not the control channel');
+    // LOGS_CHANNEL_ID pointing at the shop is ignored too
+    config.channels.logs = 'home-shop';
+    assert.equal(guilds.logsChannelId(HOME), '');
+    config.channels.logs = saved;
     // the same rule in customer servers
     assert.equal(guilds.logsChannelId(A), 'a-logs');
     // the shop channel is refused for logs (and every other feature) in /setup
@@ -316,10 +319,12 @@ async function resetHome(settings = {}) {
     assert.equal(sent[0].ch, 'home-other');
   });
 
-  await test('nothing except shop content reaches the shop: with REDEEM_LOGS = shop, settings logs and notices go nowhere', async () => {
+  await test('nothing except shop content reaches the shop: REDEEM_LOGS = shop and no logs channel -> settings logs and notices go nowhere', async () => {
     await resetHome({ channels: { solRadar: 'home-announce' } });
     const saved = config.channels.redeemLogs;
+    const savedLogs = config.channels.logs;
     config.channels.redeemLogs = 'home-shop'; // what the live HΛVØCZ settings look like
+    config.channels.logs = ''; // LOGS_CHANNEL_ID not added on Render yet
     try {
       const solCmd = require(src('commands/solradar.js'));
       const nftCmd = require(src('commands/nftradar.js'));
@@ -336,6 +341,26 @@ async function resetHome(settings = {}) {
       const st = { guildId: HOME, guild: homeGuild, client, user: { id: REMO }, memberPermissions: { has: () => true }, out: [], reply: async (m) => st.out.push(m) };
       await statusCmd.execute(st);
       assert.match(st.out[0].embeds[0].toJSON().fields.map((f) => f.value).join('\n'), /Logs: not set/);
+      // with LOGS_CHANNEL_ID set, the same logs go to that channel, still never to the shop
+      config.channels.logs = 'home-logs';
+      await run(solCmd, 'off');
+      assert.equal(sent.filter((m) => m.ch === 'home-shop').length, 0);
+      assert.equal(sent.filter((m) => m.ch === 'home-logs').length, 1);
+    } finally {
+      config.channels.redeemLogs = saved;
+      config.channels.logs = savedLogs;
+    }
+  });
+
+  await test('purchase records are the only thing that uses REDEEM_LOGS_CHANNEL_ID', async () => {
+    await resetHome();
+    const saved = config.channels.redeemLogs;
+    config.channels.redeemLogs = 'home-shop';
+    try {
+      await require(src('marketplace.js'))._test.sendLog(client, { purchaseId: 7, userId: MEMBER, itemName: 'WL spot', price: 50, status: 'Pending', guildId: HOME });
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].ch, 'home-shop', 'a purchase record (shop content) may go to the shop');
+      assert.notEqual(guilds.logsChannelId(HOME), 'home-shop');
     } finally {
       config.channels.redeemLogs = saved;
     }
@@ -364,7 +389,8 @@ async function resetHome(settings = {}) {
     assert.match(t, /Control: <#home-ctl> · from \.env/);
     assert.match(t, /Welcome: <#home-welcome> · from \.env/);
     assert.match(t, /X posts: not set/);
-    assert.match(t, /Logs: <#home-logs> · from \.env \(REDEEM_LOGS_CHANNEL_ID\)/);
+    assert.match(t, /Logs: <#home-logs> · from \.env \(LOGS_CHANNEL_ID\)/);
+    assert.equal(it.out[0].embeds[0].toJSON().footer.text, 'build: home-setup-v2', 'the build marker is at the bottom of /status');
     assert.match(t, /NFT Radar: not set/);
   });
 
