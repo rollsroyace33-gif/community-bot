@@ -2,6 +2,8 @@ const supabase = require('../db');
 const config = require('../config');
 const points = require('../points');
 const ai = require('../ai');
+const guilds = require('../guilds');
+const plans = require('../plans');
 const { getTextChannel } = require('../utils');
 
 const P = config.points;
@@ -13,11 +15,12 @@ const TEMPLATES = [
   (id, b) => `⭐ Today's MVP: <@${id}>! Great conversations and helpful chat, so here are **+${b} bonus points**.`,
 ];
 
-// Score today's logged messages with AI, then give quality points
-async function judgeAndAward(day) {
+// Score today's logged messages of ONE server with AI, then give quality points
+async function judgeAndAward(day, guildId) {
   const { data: rows, error } = await supabase
     .from('messages_log')
     .select('id,user_id,content')
+    .eq('guild_id', guildId)
     .eq('day', day)
     .is('score', null)
     .limit(2000);
@@ -25,10 +28,10 @@ async function judgeAndAward(day) {
 
   for (let i = 0; i < (rows || []).length; i += 40) {
     const batch = rows.slice(i, i + 40);
-    const scores = await ai.judgeMessages(batch.map((r) => ({ id: r.id, text: r.content })));
+    const scores = await ai.judgeMessages(batch.map((r) => ({ id: r.id, text: r.content })), { guildId });
     const upserts = batch
       .filter((r) => scores.has(r.id))
-      .map((r) => ({ id: r.id, user_id: r.user_id, day, content: r.content, score: scores.get(r.id) }));
+      .map((r) => ({ id: r.id, guild_id: guildId, user_id: r.user_id, day, content: r.content, score: scores.get(r.id) }));
     if (upserts.length) {
       const { error: upErr } = await supabase.from('messages_log').upsert(upserts, { onConflict: 'id' });
       if (upErr) throw upErr;
@@ -39,6 +42,7 @@ async function judgeAndAward(day) {
   const { data: scored } = await supabase
     .from('messages_log')
     .select('user_id,score')
+    .eq('guild_id', guildId)
     .eq('day', day)
     .not('score', 'is', null);
 
@@ -46,24 +50,26 @@ async function judgeAndAward(day) {
   for (const r of scored || []) sums.set(r.user_id, (sums.get(r.user_id) || 0) + r.score);
 
   for (const [userId, sum] of sums) {
-    await supabase.from('daily_stats').update({ quality_score: sum }).eq('user_id', userId).eq('day', day);
+    await supabase.from('daily_stats').update({ quality_score: sum }).eq('guild_id', guildId).eq('user_id', userId).eq('day', day);
 
     const target = Math.min(P.qualityCap, Math.floor(sum / P.qualityScorePerPoint));
     const { data: st } = await supabase
       .from('daily_stats')
       .select('quality_pts')
+      .eq('guild_id', guildId)
       .eq('user_id', userId)
       .eq('day', day)
       .maybeSingle();
     const need = target - (st?.quality_pts || 0); // idempotent on re-run
-    if (need > 0) await points.awardQuality(userId, day, need);
+    if (need > 0) await points.awardQuality(userId, day, need, guildId);
   }
 }
 
-async function pickTop(day) {
+async function pickTop(day, guildId) {
   const { data } = await supabase
     .from('daily_stats')
     .select('user_id,msg_count,quality_score')
+    .eq('guild_id', guildId)
     .eq('day', day)
     .gte('msg_count', P.topMinMessages)
     .order('quality_score', { ascending: false })
@@ -72,39 +78,42 @@ async function pickTop(day) {
   return data && data.length ? data[0] : null;
 }
 
-async function runDailyJob(client, { force = false } = {}) {
+// The daily job of ONE server (guildId left out = HΛVØCZ)
+async function runDailyJob(client, { force = false, guildId: rawGuildId } = {}) {
+  const guildId = guilds.gid(rawGuildId);
   const day = points.today();
 
   if (!force) {
-    const { data } = await supabase.from('daily_runs').select('day').eq('day', day).maybeSingle();
+    const { data } = await supabase.from('daily_runs').select('day').eq('guild_id', guildId).eq('day', day).maybeSingle();
     if (data) return { skipped: true, day };
   }
 
   // 1) AI quality check (if AI fails, we continue: top 1 falls back to message count)
   let aiOk = true;
   try {
-    await judgeAndAward(day);
+    await judgeAndAward(day, guildId);
   } catch (err) {
     aiOk = false;
     console.error('Quality judging failed:', err.message);
   }
 
   // 2) Top 1 (+bonus is OUTSIDE the daily cap)
-  const top = await pickTop(day);
+  const top = await pickTop(day, guildId);
   let announced = null;
   if (top) {
     const { data: already } = await supabase
       .from('daily_stats')
       .select('user_id')
+      .eq('guild_id', guildId)
       .eq('day', day)
       .gt('bonus_pts', 0)
       .limit(1);
 
     if (!already || already.length === 0) {
-      await points.adjustPoints(top.user_id, P.topBonus, 'daily top 1');
-      await supabase.from('daily_stats').update({ bonus_pts: P.topBonus }).eq('user_id', top.user_id).eq('day', day);
+      await points.adjustPoints(top.user_id, P.topBonus, 'daily top 1', guildId);
+      await supabase.from('daily_stats').update({ bonus_pts: P.topBonus }).eq('guild_id', guildId).eq('user_id', top.user_id).eq('day', day);
 
-      const ch = await getTextChannel(client, config.channels.general);
+      const ch = await getTextChannel(client, guilds.settings(guildId).channels.general);
       if (ch) {
         const msg = TEMPLATES[Math.floor(Math.random() * TEMPLATES.length)](top.user_id, P.topBonus);
         await ch.send({ content: msg, allowedMentions: { users: [top.user_id] } }).catch((e) => console.error(e.message));
@@ -113,16 +122,33 @@ async function runDailyJob(client, { force = false } = {}) {
     }
   }
 
-  // 3) record run + cleanup old logs
-  await supabase.from('daily_runs').upsert({ day, top_user_id: top ? top.user_id : null });
-  await supabase.from('messages_log').delete().lt('day', points.daysAgo(3));
+  // 3) record run + cleanup old logs (this server's rows only)
+  await supabase.from('daily_runs').upsert({ guild_id: guildId, day, top_user_id: top ? top.user_id : null }, { onConflict: 'guild_id,day' });
+  await supabase.from('messages_log').delete().eq('guild_id', guildId).lt('day', points.daysAgo(3));
   await supabase
     .from('reaction_log')
     .delete()
+    .eq('guild_id', guildId)
     .lt('created_at', new Date(Date.now() - 30 * 86400000).toISOString());
   require('../events/messageCreate').resetCounters();
 
   return { day, aiOk, top: top ? top.user_id : null, announced };
 }
 
-module.exports = { runDailyJob };
+// The nightly run: HΛVØCZ first (exactly as before), then every other server that has the points
+// feature right now. One server failing never stops the others.
+async function runAllDailyJobs(client) {
+  const results = { [guilds.homeId()]: await runDailyJob(client) };
+  for (const row of guilds.all()) {
+    const id = String(row.guild_id);
+    if (guilds.isHome(id) || row.status === 'left' || !plans.hasFeature(id, 'points')) continue;
+    try {
+      results[id] = await runDailyJob(client, { guildId: id });
+    } catch (err) {
+      console.error(`Daily job failed for guild ${id}:`, err.message);
+    }
+  }
+  return results;
+}
+
+module.exports = { runDailyJob, runAllDailyJobs };

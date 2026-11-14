@@ -2,6 +2,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('disc
 const supabase = require('../db');
 const marketplace = require('../marketplace');
 const { isAdmin } = require('../utils');
+const guilds = require('../guilds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -11,7 +12,7 @@ module.exports = {
   async execute(interaction) {
     if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const { data } = await supabase.from('items').select('*').eq('active', true).order('id').limit(50);
+    const { data } = await supabase.from('items').select('*').eq('guild_id', guilds.gid(interaction)).eq('active', true).order('id').limit(50);
     if (!data || data.length === 0) return interaction.editReply('There are no active items.');
 
     const health = await Promise.all(data.map((i) => marketplace.cardExists(interaction.client, i)));

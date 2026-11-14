@@ -16,6 +16,7 @@ const chatContext = require('./chatContext');
 const { isBossOffline } = require('./tasks/time');
 const { allowQa } = require('./ratelimit');
 const T = require('./bossTemplates');
+const guilds = require('./guilds');
 
 const MIN_REPLY_GAP_MS = 4000; // tiny per-session cooldown
 const recent = new Map(); // channelId -> [{ authorId, at }] recent human messages (last few)
@@ -71,6 +72,9 @@ const why = (message, reason) => (console.log(`[offline-chat] ${message.id} in #
 
 async function handle(message) {
   try {
+    // lone-member chat belongs to the boss's offline hours, which only HΛVØCZ has configured
+    if (!guilds.settings(message).bossHours) return false;
+    const guildId = guilds.gid(message);
     if (!isBossOffline(clock.now())) return why(message, 'skip: outside the boss offline hours window'); // outside the window: behavior unchanged (silence)
     if (!isChatChannel(message)) return why(message, 'skip: not a chat channel (excluded / ticket / X drop / not text)');
     if (looksSkippable(message)) return why(message, 'skip: message looks skippable (link-only, mentions others, emoji, too long)');
@@ -96,7 +100,7 @@ async function handle(message) {
     const pastSoftLimit = s.replies >= config.offline.softReplies;
     if (pastSoftLimit && !norm.includes('?')) return why(message, 'skip: soft reply limit reached, not a question');
     if (now - s.lastReplyAt < MIN_REPLY_GAP_MS) return why(message, 'skip: reply gap cooldown');
-    if (!allowQa(uid)) return why(message, 'skip: QA_PER_HOUR rate limit'); // the existing hourly per-member limit
+    if (!allowQa(uid, guildId)) return why(message, 'skip: QA_PER_HOUR rate limit'); // the existing hourly per-member limit
 
     let reply;
     const info = {};
@@ -106,6 +110,7 @@ async function handle(message) {
         silentIfCasual: pastSoftLimit, // past the limit: casual chat -> no reply
         chatStyle: { maxLines: config.offline.maxLines, noQuestions: true },
         info,
+        guildId,
       });
     } catch (err) {
       console.error('offline chat AI:', err.stack);

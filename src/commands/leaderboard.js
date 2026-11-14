@@ -1,5 +1,6 @@
 const { SlashCommandBuilder } = require('discord.js');
 const supabase = require('../db');
+const guilds = require('../guilds');
 
 module.exports = {
   data: new SlashCommandBuilder().setName('leaderboard').setDescription('Top 10 point holders'),
@@ -8,6 +9,7 @@ module.exports = {
     const { data } = await supabase
       .from('users')
       .select('user_id,points')
+      .eq('guild_id', guilds.gid(interaction))
       .gt('points', 0)
       .order('points', { ascending: false })
       .limit(10);

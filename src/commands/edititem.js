@@ -2,6 +2,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('disc
 const supabase = require('../db');
 const marketplace = require('../marketplace');
 const { isAdmin } = require('../utils');
+const guilds = require('../guilds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -31,7 +32,7 @@ module.exports = {
     if (stock !== null) patch.stock = stock;
     if (Object.keys(patch).length === 0) return interaction.editReply('You did not specify anything to change.');
 
-    const { data, error } = await supabase.from('items').update(patch).eq('id', id).eq('active', true).select();
+    const { data, error } = await supabase.from('items').update(patch).eq('guild_id', guilds.gid(interaction)).eq('id', id).eq('active', true).select();
     if (error) throw error;
     if (!data || data.length === 0) return interaction.editReply('Item not found.');
 

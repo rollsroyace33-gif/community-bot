@@ -12,7 +12,7 @@ module.exports = {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      const count = await marketplace.setupHeader(interaction.client);
+      const count = await marketplace.setupHeader(interaction.client, interaction.guildId);
       await interaction.editReply(`✅ Marketplace header posted. ${count} item card(s) reposted below it.`);
     } catch (e) {
       await interaction.editReply(`Could not set up the marketplace: ${e.message}`);

@@ -22,6 +22,7 @@ const bossGate = require('./bossGate');
 const T = require('./bossTemplates');
 const { createBag } = require('./bag');
 const { allowQa } = require('./ratelimit');
+const guilds = require('./guilds');
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const draw = createBag();
@@ -53,7 +54,7 @@ function isClosingRemark(text) {
 
 // ---------------- Greetings (members) ----------------
 const GREET_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour per user
-const lastGreet = new Map(); // userId -> timestamp
+const lastGreet = new Map(); // `${guildId}:${userId}` -> timestamp
 
 const MORNING_REPLIES = [
   (u) => `☀️ Good morning, ${u}! Hope you have an amazing day!`,
@@ -77,8 +78,9 @@ async function handleGreeting(message) {
   if (!pool) return false;
 
   const now = Date.now();
-  if (now - (lastGreet.get(message.author.id) || 0) < GREET_COOLDOWN_MS) return why(message, 'greeting skipped: 1h greeting cooldown'), false;
-  lastGreet.set(message.author.id, now);
+  const who = `${guilds.gid(message)}:${message.author.id}`;
+  if (now - (lastGreet.get(who) || 0) < GREET_COOLDOWN_MS) return why(message, 'greeting skipped: 1h greeting cooldown'), false;
+  lastGreet.set(who, now);
 
   await message
     .reply({ content: pick(pool)(`<@${message.author.id}>`), allowedMentions: { users: [message.author.id], repliedUser: false } })
@@ -89,15 +91,16 @@ async function handleGreeting(message) {
 // ---------------- Creator identity ("who made you", members only) ----------------
 // Only answers the question. It never gives anyone extra powers.
 async function sendCreatorReply(message, { useAi }) {
-  const content = await personality.creatorReply({ useAi }); // never throws, falls back to fixed lines
+  const content = await personality.creatorReply({ useAi, guildId: guilds.gid(message) }); // never throws, falls back to fixed lines
   await message
-    .reply({ content, allowedMentions: personality.creatorMentions() }) // pings the boss only
+    .reply({ content, allowedMentions: personality.creatorMentions(message) }) // pings the boss only (HΛVØCZ); nobody elsewhere
     .catch((err) => console.error('creator reply:', err.stack));
 }
 
 // ---------------- Conversation ----------------
 // true = Vexo replied
 async function converse(message, { isBoss, isAsk, addr }) {
+  const guildId = guilds.gid(message);
   const botId = message.client.user.id;
   const text = message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim();
   // un-addressed #ask messages need some substance; a bare "@Vexo" still gets a reply
@@ -106,7 +109,7 @@ async function converse(message, { isBoss, isAsk, addr }) {
 
   // cheap regex first (members only: the boss knows who made Vexo, the AI answers him in character)
   if (!isBoss && personality.isCreatorQuestion(said)) {
-    const withinLimit = allowQa(message.author.id);
+    const withinLimit = allowQa(message.author.id, guildId);
     // over the hourly limit: direct mentions still get a fixed (no-AI) answer, #ask gets ⏳
     if (!withinLimit && !addr.any) {
       why(message, 'no reply: QA_PER_HOUR rate limit (creator question)');
@@ -118,7 +121,7 @@ async function converse(message, { isBoss, isAsk, addr }) {
   }
 
   // members: max QA_PER_HOUR AI replies per hour. The boss is never rate limited.
-  if (!isBoss && !allowQa(message.author.id)) {
+  if (!isBoss && !allowQa(message.author.id, guildId)) {
     why(message, 'no AI reply: QA_PER_HOUR rate limit');
     if (addr.mentioned) await message.reply('Easy there, my brain needs a breather. Try me again a bit later ⏳').catch((err) => console.error('rate limit reply:', err.stack));
     else if (isAsk && !addr.any) await message.react('⏳').catch((err) => console.error('react:', err.stack));
@@ -132,6 +135,7 @@ async function converse(message, { isBoss, isAsk, addr }) {
       silentIfCasual: isAsk && !addr.any, // #ask without being addressed: only real questions get an answer
       detectCreator: !isBoss,
       context: chatContext.get(message.channelId), // recent chat, recorded before this message
+      guildId,
     });
     if (!reply) return why(message, 'no reply: AI chose to stay silent (casual / empty answer)'), false;
     // the AI recognized a "who made you" question the regex missed
@@ -148,6 +152,8 @@ async function converse(message, { isBoss, isAsk, addr }) {
     chatContext.recordBot(message.channelId, reply);
     return true;
   } catch (err) {
+    // this server has no AI calls left today (or lost premium a moment ago): stay silent
+    if (err.code === 'AI_LIMIT') return why(message, 'no reply: AI not available for this server (plan or daily limit)'), false;
     console.error('reply error:', err.stack);
     if (addr.any || isBoss) {
       await message.reply({ content: pick(isBoss ? BOSS_GLITCH : GLITCH), allowedMentions: quiet }).catch((e) => console.error('glitch reply:', e.stack));
@@ -209,9 +215,10 @@ async function bossMessage(message, { isAsk, addr, awayMs }) {
 // awayMs: gap since the boss's previous message (from bossPresence, already updated by the caller)
 // Returns { isAsk } so the caller can keep the points rules ("#ask earns no points").
 async function respond(message, { awayMs = null } = {}) {
-  const isBoss = identity.isBoss(message.author); // who is talking: Discord user ID only
+  const isBoss = identity.isBoss(message.author, message); // who is talking: Discord user ID only (this server's boss)
   if (isBoss) identity.noteBoss(message, 'chat');
-  const isAsk = !!config.channels.ask && message.channelId === config.channels.ask;
+  const askChannel = guilds.settings(message).channels.ask;
+  const isAsk = !!askChannel && message.channelId === askChannel;
 
   try {
     const addr = addressed(message);

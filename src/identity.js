@@ -1,14 +1,20 @@
 // Who is talking? The ONE place that decides whether a message comes from the boss.
-// Identity is the Discord user ID only (BOSS_USER_ID). Names, roles or "I'm the boss" in a
-// message never count, so nobody gets special treatment by claiming to be the boss.
+// Identity is the Discord user ID only. Names, roles or "I'm the boss" in a message never count,
+// so nobody gets special treatment by claiming to be the boss.
+//   HΛVØCZ:        the boss is BOSS_USER_ID (.env)
+//   other servers: the boss is that server's boss_user_id (the admin who set Vexo up; /setup can change it)
+// The boss of one server is a regular member in every other server.
 const config = require('./config');
+const guilds = require('./guilds');
 
 const norm = (id) => String(id ?? '').trim();
 
-// user can be a Discord User / GuildMember / Interaction user, or a plain ID string
-function isBoss(user) {
+// user:  a Discord User / GuildMember / Interaction user, or a plain ID string
+// guild: a guild id, or anything from that server (Message, Interaction, Guild). Left out = HΛVØCZ.
+function isBoss(user, guild) {
   const id = norm(typeof user === 'object' && user !== null ? user.id : user);
-  return !!config.bossUserId && id === config.bossUserId;
+  const bossId = norm(guilds.settings(guild).bossUserId);
+  return !!bossId && id === bossId;
 }
 
 // Startup check, no secrets: says whether BOSS_USER_ID is set and how long it is.

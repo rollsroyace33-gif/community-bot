@@ -14,9 +14,12 @@ const orderTime = require('./orderTime');
 const { tidy, stripPitch } = require('../personality');
 const knowledge = require('../knowledge');
 const identity = require('../identity');
+const guilds = require('../guilds');
+const plans = require('../plans');
+const { AsyncLocalStorage } = require('async_hooks');
 
-// boss = BOSS_USER_ID only (shared check, same as every other channel)
-const isBoss = (message) => identity.isBoss(message.author);
+// boss = the boss of the message's own server, by user ID only (shared check, same as every other channel)
+const isBoss = (message) => identity.isBoss(message.author, message);
 
 const PENDING_TTL_MS = 10 * 60 * 1000; // an unconfirmed action expires after 10 minutes
 const MAX_HISTORY = 10; // control channel memory: last 10 messages
@@ -25,10 +28,21 @@ const MIN_NOTICE_MS = 60 * 1000; // "now" = in 1 minute, so members get a heads-
 const MIN = 60 * 1000;
 const EXPIRED_NOTE_MS = 2 * 60 * 60 * 1000; // a "yes" this long after an order expired still gets "it expired"
 
-// Memory is per control channel (there is only one): recent lines + the action awaiting yes/no
-let history = []; // "Boss (name): ..." / "Vexo: ..."
-let pending = null; // { kind, draft, describe, run, expiresAt } · kind "choice": { options, question } (pick a start time)
-let expired = null; // { at } when the last unconfirmed action ran out (a late "yes" is told so)
+// Memory is per control channel, and every server has its own: recent lines + the action awaiting yes/no.
+//   history: "Boss (name): ..." / "Vexo: ..."
+//   pending: { kind, draft, describe, run, expiresAt } · kind "choice": { options, question } (pick a start time)
+//   expired: { at } when the last unconfirmed action ran out (a late "yes" is told so)
+// While one control message is being handled, S() is the memory of THAT message's server (kept across
+// every await by AsyncLocalStorage), so two servers can never see or confirm each other's orders.
+const memories = new Map(); // guildId -> { guildId, history, pending, expired }
+const current = new AsyncLocalStorage();
+function memoryOf(guildId) {
+  const id = guilds.gid(guildId);
+  if (!memories.has(id)) memories.set(id, { guildId: id, history: [], pending: null, expired: null });
+  return memories.get(id);
+}
+const S = () => current.getStore() || memoryOf();
+const cfg = () => guilds.settings(S().guildId); // this server's channels / roles
 
 // Used only when the AI is down: a plain yes / no still works for the pending action
 const YES = /^(y|yes|yeah|yep|ok|okay|confirm|sure|go|do it|ha+|ha+n|hya|ji|thik ache|ha thik ache|হ্যাঁ|হ্যা|হা|জি|ঠিক আছে|ওকে)[\s.!👍✅]*$/iu;
@@ -46,22 +60,24 @@ const DROPPED = ['Dropped it, nothing changed.', 'Scrapped, nothing changed.', '
 
 function isAuthorized(message) {
   if (isBoss(message)) return true;
-  return !!message.member?.roles?.cache?.some((r) => config.staffRoleIds.includes(r.id));
+  return !!message.member?.roles?.cache?.some((r) => cfg().staffRoleIds.includes(r.id));
 }
 
 const speakerName = (message) => `${isBoss(message) ? 'Boss' : 'Staff'} (${message.author.username})`;
 
 function remember(line) {
-  history.push(line.replace(/\s*\n\s*/g, ' / ').slice(0, 500)); // one line per message in the prompt
-  if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
+  const s = S();
+  s.history.push(line.replace(/\s*\n\s*/g, ' / ').slice(0, 500)); // one line per message in the prompt
+  if (s.history.length > MAX_HISTORY) s.history = s.history.slice(-MAX_HISTORY);
 }
 
 function getPending() {
-  if (pending && Date.now() > pending.expiresAt) {
-    pending = null;
-    expired = { at: Date.now() };
+  const s = S();
+  if (s.pending && Date.now() > s.pending.expiresAt) {
+    s.pending = null;
+    s.expired = { at: Date.now() };
   }
-  return pending;
+  return s.pending;
 }
 
 // Reply in the control channel and remember it. `note` is extra context for the AI's memory only.
@@ -120,7 +136,7 @@ function resolveChannel(message, name) {
   if (mentioned) return mentioned.id;
   const wanted = String(name).replace(/^<#(\d+)>$/, '$1').replace(/^#/, '').trim().toLowerCase();
   if (/^\d{15,}$/.test(wanted)) return wanted;
-  if (wanted === 'general') return config.channels.general;
+  if (wanted === 'general') return cfg().channels.general;
   const found = message.guild.channels.cache.find((c) => c.name.toLowerCase() === wanted && c.isTextBased());
   return found ? found.id : undefined;
 }
@@ -135,7 +151,7 @@ function taskLine(t) {
   return (
     `#${t.id} ${t.type} | boss clock ${bossLocal(t.run_at)} | status ${t.status}` +
     ` | prize ${t.params?.prize || 'none'} | range ${lo}-${hi}` +
-    ` | channel ${t.channel_id === config.channels.general ? 'general' : 'other'}`
+    ` | channel ${t.channel_id === cfg().channels.general ? 'general' : 'other'}`
   );
 }
 
@@ -150,7 +166,7 @@ async function pickTarget(message, ai, active) {
 
 // store an action that runs on "yes", and show its summary
 function propose(message, kind, draft, describe, summary, run) {
-  pending = { kind, draft, describe, run, expiresAt: Date.now() + PENDING_TTL_MS };
+  S().pending = { kind, draft, describe, run, expiresAt: Date.now() + PENDING_TTL_MS };
   return say(message, summary);
 }
 
@@ -159,7 +175,7 @@ function propose(message, kind, draft, describe, summary, run) {
 // summary; this file runs the yes/no flow (plus a second yes for a huge points prize), the
 // "host it right now instead" offer and the "which start time" choice.
 async function plannedOrder(message, ai, handler) {
-  const plan = await handler.planOrder({ ai, text: message.content, createdBy: message.author.id, followUp: !!ai._followUp });
+  const plan = await handler.planOrder({ ai, text: message.content, createdBy: message.author.id, followUp: !!ai._followUp, guildId: S().guildId });
   return presentPlan(message, handler, plan, opener(ai));
 }
 
@@ -169,14 +185,14 @@ async function presentPlan(message, handler, plan, lead) {
   if (plan.choice) {
     const { question, options } = plan.choice;
     const list = options.map((o, i) => `${i + 1}) game start at boss clock ${bossLocal(o.at)}`).join(', ');
-    pending = { kind: 'choice', handler, options, question, draft: null, describe: `waiting for the boss to pick ONE game start: ${list}`, expiresAt: Date.now() + PENDING_TTL_MS };
+    S().pending = { kind: 'choice', handler, options, question, draft: null, describe: `waiting for the boss to pick ONE game start: ${list}`, expiresAt: Date.now() + PENDING_TTL_MS };
     return say(message, question, 'waiting for the boss to pick the game start time');
   }
   if (plan.offer) {
     const next = await plan.offer.next();
     // the alternative is ready: show it with the question, one "yes" schedules it
     if (next.summary) return proposePlan(message, handler, next, `${plan.offer.question}\n`);
-    pending = { kind: 'offer', handler, draft: null, describe: `waiting for yes/no: ${plan.offer.question}`, run: async () => ({ present: next }), expiresAt: Date.now() + PENDING_TTL_MS };
+    S().pending = { kind: 'offer', handler, draft: null, describe: `waiting for yes/no: ${plan.offer.question}`, run: async () => ({ present: next }), expiresAt: Date.now() + PENDING_TTL_MS };
     return say(message, `${plan.offer.question} (yes/no)`);
   }
   return proposePlan(message, handler, plan, lead);
@@ -193,7 +209,7 @@ function proposePlan(message, handler, plan, lead) {
   if (!plan.doubleCheck) return propose(message, 'schedule', plan.draft, plan.describe, summary, create);
   // typo guard: the first yes asks once more
   return propose(message, 'schedule', plan.draft, plan.describe, summary, async () => {
-    pending = { kind: 'schedule', draft: plan.draft, describe: `${plan.describe} (waiting for the second yes)`, run: create, expiresAt: Date.now() + PENDING_TTL_MS };
+    S().pending = { kind: 'schedule', draft: plan.draft, describe: `${plan.describe} (waiting for the second yes)`, run: create, expiresAt: Date.now() + PENDING_TTL_MS };
     return { text: `${plan.doubleCheck}\nConfirm again? (yes/no)`, note: 'waiting for the second yes (big points prize)' };
   });
 }
@@ -201,8 +217,14 @@ function proposePlan(message, handler, plan, lead) {
 async function scheduleOrder(message, ai, active) {
   const handler = registry.get(ai.task_type) || registry.get('number_guess');
   if (handler.planOrder) return plannedOrder(message, ai, handler);
-  if (!config.channels.general) {
-    return say(message, "Boss, GENERAL_CHANNEL_ID is missing in .env, so I have nowhere to host the game. Add it, restart me, and ask again.");
+  const general = cfg().channels.general; // HΛVØCZ: GENERAL_CHANNEL_ID, other servers: their games channel
+  if (!general) {
+    return say(
+      message,
+      cfg().isHome
+        ? "Boss, GENERAL_CHANNEL_ID is missing in .env, so I have nowhere to host the game. Add it, restart me, and ask again."
+        : 'Boss, no games channel is set for this server, so I have nowhere to host the game. Run /setup and ask again.'
+    );
   }
   const time = resolveWhen(message.content, ai.time);
   if (time.question) return say(message, time.question);
@@ -210,12 +232,12 @@ async function scheduleOrder(message, ai, active) {
   const lead = time.past ? `${pastQuestion(time.past)}\n` : `${opener(ai)} `;
   if (time.past) time.date = time.past.tomorrow || new Date(Date.now() + MIN_NOTICE_MS);
 
-  let channelId = config.channels.general;
+  let channelId = general;
   let note = '';
   if (ai.channel) {
     const id = resolveChannel(message, ai.channel);
     if (id === undefined) return say(message, `I can't find a channel called "${clean(ai.channel)}", boss. Which one should I use?`);
-    if (id && id !== config.channels.general) {
+    if (id && id !== general) {
       channelId = id;
       note += `\n⚠️ That's **not** the general channel. Sure you want it in <#${id}>?`;
     }
@@ -246,14 +268,16 @@ async function scheduleOrder(message, ai, active) {
   const summary = `${lead}${handler.label} at **${when(time.date)}** in <#${channelId}>, numbers ${lo}-${hi}, ${prize}.${note}\nConfirm? (yes/no)`;
   const describe =
     `schedule ${handler.type} at boss clock ${bossLocal(time.date)}, ` +
-    `prize ${params.prize || 'none'}, range ${lo}-${hi}, channel ${channelId === config.channels.general ? 'general' : 'other'}`;
+    `prize ${params.prize || 'none'}, range ${lo}-${hi}, channel ${channelId === general ? 'general' : 'other'}`;
   const draftTime = { local: bossWall(time.date), zone: null }; // "make it 9 instead" keeps the rest
 
   const draft = { task_type: handler.type, prize: params.prize, range: params.range, channel: ai.channel, time: draftTime };
+  const guildId = S().guildId;
   const create = async () => {
     // confirmed late? still give members at least a minute's notice
     const runAt = new Date(Math.max(time.date.getTime(), Date.now() + MIN_NOTICE_MS));
     const row = await store.create({
+      guild_id: guildId,
       type: handler.type,
       run_at: runAt.toISOString(), // UTC
       channel_id: channelId,
@@ -268,7 +292,7 @@ async function scheduleOrder(message, ai, active) {
   if (!big) return propose(message, 'schedule', draft, describe, summary, create);
   // typo guard (same as Rumble): the first yes asks once more
   return propose(message, 'schedule', draft, describe, summary, async () => {
-    pending = { kind: 'schedule', draft, describe: `${describe} (waiting for the second yes)`, run: create, expiresAt: Date.now() + PENDING_TTL_MS };
+    S().pending = { kind: 'schedule', draft, describe: `${describe} (waiting for the second yes)`, run: create, expiresAt: Date.now() + PENDING_TTL_MS };
     return {
       text: `⚠️ Second check: **${params.prize_points} points** is above RUMBLE_MAX_POINTS_PRIZE (${config.rumble.maxPointsPrize}).\nConfirm again? (yes/no)`,
       note: 'waiting for the second yes (big points prize)',
@@ -346,7 +370,7 @@ const factLines = (facts) => facts.map((f) => `#${f.id} ${f.fact}`).join('\n');
 async function resolveQuestions(ids) {
   if (!ids.length) return '';
   try {
-    const done = await knowledge.resolveUnanswered(ids);
+    const done = await knowledge.resolveUnanswered(ids, S().guildId);
     return done.length ? ` That also answers ${done.length} open question${done.length === 1 ? '' : 's'}.` : '';
   } catch (err) {
     console.error('resolve unanswered:', err.message);
@@ -355,7 +379,7 @@ async function resolveQuestions(ids) {
 }
 
 async function pickFact(message, ai) {
-  const facts = knowledge.getFacts();
+  const facts = knowledge.getFacts(S().guildId);
   const fact = ai.fact_id ? facts.find((f) => f.id === ai.fact_id) : null;
   if (fact) return fact;
   if (!facts.length) await say(message, "You haven't taught me anything yet, boss.");
@@ -369,9 +393,9 @@ async function teachFact(message, ai) {
   if (!text) return say(message, 'What should I remember, boss?');
   const secret = knowledge.looksSecret(text);
   if (secret) return say(message, secretWarning(secret));
-  const same = knowledge.findSameFact(text);
+  const same = knowledge.findSameFact(text, S().guildId);
   if (same) return say(message, `I already know that one, boss (fact #${same.id}).`);
-  const row = await knowledge.addFact(text, message.author.id);
+  const row = await knowledge.addFact(text, message.author.id, S().guildId);
   return say(message, `${opener(ai)} Saved as fact #${row.id}.${await resolveQuestions(ai.resolves)}`, `fact #${row.id} saved: ${text}`);
 }
 
@@ -383,7 +407,7 @@ async function editFact(message, ai) {
   if (!text) return say(message, `What should fact #${fact.id} say now, boss?`);
   const secret = knowledge.looksSecret(text);
   if (secret) return say(message, secretWarning(secret));
-  const row = await knowledge.editFact(fact.id, text);
+  const row = await knowledge.editFact(fact.id, text, S().guildId);
   if (!row) return say(message, `I couldn't find fact #${fact.id} anymore, boss.`);
   return say(message, `${opener(ai)} Fact #${row.id} updated.${await resolveQuestions(ai.resolves)}`, `fact #${row.id} now: ${text}`);
 }
@@ -392,7 +416,7 @@ async function forgetFact(message, ai) {
   if (!isBoss(message)) return say(message, pick(ONLY_BOSS));
   const fact = await pickFact(message, ai);
   if (!fact) return;
-  const row = await knowledge.forgetFact(fact.id);
+  const row = await knowledge.forgetFact(fact.id, S().guildId);
   if (!row) return say(message, `Fact #${fact.id} was already gone, boss.`);
   return say(message, `${opener(ai)} Forgot fact #${row.id}: "${row.fact.slice(0, 120)}".`);
 }
@@ -400,7 +424,7 @@ async function forgetFact(message, ai) {
 async function listUnanswered(message, ai) {
   let top;
   try {
-    top = await knowledge.topUnanswered(10);
+    top = await knowledge.topUnanswered(10, S().guildId);
   } catch (err) {
     console.error('list unanswered:', err.message);
     return say(message, "I couldn't load the question list, boss. Is the vexo_unanswered table set up?");
@@ -411,7 +435,7 @@ async function listUnanswered(message, ai) {
 }
 
 async function confirmPending(message, p, lead) {
-  pending = null;
+  S().pending = null;
   const result = await p.run();
   if (result.present) return presentPlan(message, p.handler, result.present, lead); // "yes" to an offer: show the plan
   return say(message, `${lead} ${result.text}`, result.note);
@@ -439,34 +463,36 @@ async function handleOrder(message) {
     const idx = orderTime.pickOption(text, p.options);
     if (idx !== null) {
       remember(`${speaker}: ${text}`);
-      pending = null;
+      S().pending = null;
       return presentPlan(message, p.handler, await p.options[idx].next(), pick(OPENERS));
     }
   }
   // a "yes" after the order already expired: say so instead of ignoring it
-  if (!p && expired && YES.test(text) && Date.now() - expired.at < EXPIRED_NOTE_MS) {
+  if (!p && S().expired && YES.test(text) && Date.now() - S().expired.at < EXPIRED_NOTE_MS) {
     remember(`${speaker}: ${text}`);
-    expired = null;
+    S().expired = null;
     return say(message, EXPIRED_TEXT, 'the pending order had expired');
   }
-  const active = await store.listActive();
-  const unanswered = await knowledge.topUnanswered(10).catch(() => []); // table may not exist yet
+  const active = await store.listActive(S().guildId); // this server's tasks only
+  const unanswered = await knowledge.topUnanswered(10, S().guildId).catch(() => []); // table may not exist yet
   let ai;
   try {
     // the AI sees id / type / time / status / prize, never the task state (secret number)
     ai = await understand(text, speaker, {
       tasks: active.map(taskLine),
-      facts: knowledge.getFacts().slice(-60).map((f) => `#${f.id} ${f.fact.slice(0, 200)}`),
+      facts: knowledge.getFacts(S().guildId).slice(-60).map((f) => `#${f.id} ${f.fact.slice(0, 200)}`),
       unanswered: unanswered.map((q) => `#${q.id} (asked ${q.times_asked}x) ${q.question}`),
       pending: p?.describe,
-      history,
+      history: S().history,
+      guildId: S().guildId,
     });
   } catch (err) {
+    if (err.code === 'AI_LIMIT') throw err; // no AI for this server right now: handled (silently) by handleMessage
     console.error('control AI:', err.message);
     remember(`${speaker}: ${text}`);
     if (p && p.kind !== 'choice' && YES.test(text)) return confirmPending(message, p, pick(OPENERS));
     if (p && NO.test(text)) {
-      pending = null;
+      S().pending = null;
       return say(message, `Okay boss. ${pick(DROPPED)}`);
     }
     return say(message, pick(GLITCH));
@@ -489,7 +515,7 @@ async function handleOrder(message) {
     case 'forget_fact':
       return forgetFact(message, ai);
     case 'list_facts': {
-      const facts = knowledge.getFacts();
+      const facts = knowledge.getFacts(S().guildId);
       return say(message, facts.length ? `${opener(ai)}\n${factLines(facts)}` : "You haven't taught me anything yet, boss.");
     }
     case 'list_unanswered':
@@ -499,14 +525,14 @@ async function handleOrder(message) {
     case 'confirm_yes':
       if (p?.kind === 'choice') return say(message, `Which one, boss? ${p.options.map((o, i) => `${['First', 'Second', 'Third'][i]}: ${ts(o.at, 't')}`).join(' · ')}`);
       if (p) return confirmPending(message, p, opener(ai));
-      if (expired && Date.now() - expired.at < EXPIRED_NOTE_MS) {
-        expired = null;
+      if (S().expired && Date.now() - S().expired.at < EXPIRED_NOTE_MS) {
+        S().expired = null;
         return say(message, EXPIRED_TEXT, 'the pending order had expired');
       }
       return say(message, `${opener(ai)} There's nothing waiting for a yes right now, though.`);
     case 'confirm_no':
       if (p) {
-        pending = null;
+        S().pending = null;
         return say(message, `${opener(ai)} ${pick(DROPPED)}`);
       }
       return say(message, `${opener(ai)} Nothing was pending anyway.`);
@@ -522,16 +548,26 @@ async function handleOrder(message) {
 // (Q&A, points, greetings) runs there. Unauthorized users are silently ignored
 // and never reach the AI or the conversation memory.
 async function handleMessage(message) {
-  if (!config.channels.control || message.channelId !== config.channels.control) return false;
-  if (!isAuthorized(message)) return true;
-  if (isBoss(message)) identity.noteBoss(message, 'control');
-  try {
-    await handleOrder(message);
-  } catch (err) {
-    console.error('control order:', err.message);
-    await say(message, 'Something glitched on my side, boss 😵 Nothing was changed. Try again?');
-  }
-  return true;
+  const control = guilds.settings(message).channels.control;
+  if (!control || message.channelId !== control) return false;
+  // plain-language orders are understood by the AI: a premium feature (HΛVØCZ: always on). Without it Vexo
+  // stays silent here; games are started with /rumble and /guess, knowledge with /knowledge.
+  if (!plans.hasFeature(message, 'aiChat')) return true;
+  return current.run(memoryOf(message), async () => {
+    if (!isAuthorized(message)) return true;
+    if (isBoss(message)) identity.noteBoss(message, 'control');
+    try {
+      // "host a giveaway for ..." (premium: giveaway_orders). It only looks at messages with the word
+      // "giveaway" (or an answer to its own question); anything else continues below exactly as before.
+      if (await require('../giveaway').handleControl(message)) return true;
+      await handleOrder(message);
+    } catch (err) {
+      if (err.code === 'AI_LIMIT') return true; // today's AI calls are used up: silent (the admin sees it in /status)
+      console.error('control order:', err.message);
+      await say(message, 'Something glitched on my side, boss 😵 Nothing was changed. Try again?');
+    }
+    return true;
+  });
 }
 
 module.exports = { handleMessage };

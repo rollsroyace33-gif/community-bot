@@ -34,6 +34,11 @@ module.exports = {
     rules: process.env.RULES_CHANNEL_ID || '',
     control: process.env.CONTROL_CHANNEL_ID || '', // private channel for orders (empty = task system off)
     ticket: process.env.TICKET_CHANNEL_ID || '', // linked in the game winner message
+    giveaway: (process.env.GIVEAWAY_CHANNEL_ID || '').trim(), // HΛVØCZ's giveaway channel (empty = /giveaway needs its channel option)
+    // HΛVØCZ's channels for the radar / Personal Vexo features. Made by hand, never auto-created. Empty = off there.
+    nftRadar: (process.env.NFT_RADAR_CHANNEL_ID || '').trim(),
+    solRadar: (process.env.SOL_RADAR_CHANNEL_ID || '').trim(),
+    assistant: (process.env.VEXO_ASSISTANT_CHANNEL_ID || '').trim(), // "get-vexo-assistant": members request Personal Vexo here
   },
 
   // Discord user ID of remo.sol (Vexo's creator). Answers "who made you" and can give orders in the control channel.
@@ -118,7 +123,53 @@ module.exports = {
     maxPerDay: num(process.env.X_DROP_MAX_PER_DAY, 5), // credited drops per member per day, 0 = unlimited
   },
 
+  // SOL Radar (src/solRadar.js): daily SOL market updates. No COINGECKO_API_KEY = the feature is off everywhere.
+  solRadar: {
+    apiKey: (process.env.COINGECKO_API_KEY || '').trim(),
+    times: list(process.env.SOL_RADAR_TIMES || '01:00,06:00,11:00,16:00,21:00'), // default post times (each server can change its own)
+    timezone: (process.env.SOL_RADAR_TIMEZONE || 'UTC').trim(), // the clock those default times are on
+  },
+
+  // NFT Radar (src/nftRadar.js): upcoming Solana NFT mints, researched on the web, published only after an
+  // admin presses Approve. No TAVILY_API_KEY = the feature is off everywhere (the bot still starts).
+  nftRadar: {
+    tavilyKey: (process.env.TAVILY_API_KEY || '').trim(),
+    times: list(process.env.NFT_RADAR_TIMES || '09:00,21:00'), // when Vexo looks for new projects (UTC), shared by all servers
+    maxNewPerDay: 5, // at most this many new projects researched per day (keeps the free 1,000 searches a month safe)
+    maxSearchesPerDay: 30, // hard stop for web searches per day
+    maxRequestsPerGuildPerDay: 3, // approval requests per server per day
+    minScore: 6, // AI score out of 10 a project needs to be sent for approval
+  },
+
   marketplace: {
     autoRemoveSoldOut: (process.env.AUTO_REMOVE_SOLD_OUT || 'false').toLowerCase() === 'true',
+  },
+
+  // ================= multi-server =================
+  // The home server (HΛVØCZ). It keeps every setting above, always has every feature, and nothing is
+  // auto-created there. HOME_GUILD_ID empty = GUILD_ID is used.
+  homeGuildId: (process.env.HOME_GUILD_ID || process.env.GUILD_ID || '').trim(),
+  homeGuildName: (process.env.HOME_GUILD_NAME || 'HΛVØCZ').trim(), // only used if the guilds table can't be read
+  creatorName: (process.env.CREATOR_NAME || 'remo.sol').trim(), // who made Vexo (said in every server)
+  // the bot owner: the only user who can use /admin (activate / deactivate / extendtrial / list)
+  ownerId: (process.env.OWNER_ID || '').trim(),
+  trialDays: num(process.env.TRIAL_DAYS, 15), // free trial length for a new server (one trial per server, ever)
+  defaultDailyAiLimit: num(process.env.DEFAULT_DAILY_AI_LIMIT, 300), // AI calls per server per day (not HΛVØCZ)
+  supportContact: (process.env.SUPPORT_CONTACT || '').trim(), // payment / contact text shown in expiry notices
+
+  // THE feature map: 'free' = every server, 'premium' = trial or paid servers only (HΛVØCZ: everything).
+  // Change a word here to move a feature between plans. Free features never call the AI.
+  features: {
+    rumble: 'free', // Rumble Royale host (/rumble)
+    numberGuess: 'free', // number guess game host (/guess), pre-written lines only
+    aiChat: 'premium', // talking with Vexo in the server, AI banter in games, plain-language control channel orders
+    knowledgeQa: 'premium', // answers about the project from this server's knowledge
+    automod: 'premium', // rule-based auto moderation
+    points: 'premium', // activity points, leaderboard, daily top chatter
+    marketplace: 'premium', // points shop
+    giveaway: 'free', // giveaways with /giveaway (pre-written lines only, zero AI calls)
+    giveaway_orders: 'premium', // "host a giveaway for..." written in the control channel (one small AI call)
+    solRadar: 'premium', // SOL Radar: 4 to 5 SOL market updates a day in the SOL Radar channel
+    nftRadar: 'premium', // NFT Radar: researched upcoming Solana mints, posted only after admin approval
   },
 };

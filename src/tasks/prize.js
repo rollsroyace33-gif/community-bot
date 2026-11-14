@@ -10,6 +10,7 @@
 const store = require('./store');
 const supabase = require('../db');
 const points = require('../points');
+const guilds = require('../guilds');
 
 function classifyPrize(raw) {
   const prize = String(raw ?? '')
@@ -65,13 +66,15 @@ function resolvePrize(params = {}) {
 
 const paying = new Set();
 
-// ctx: { taskId, game?, state, winnerId, amount, reason?, persist? }  ->  { ok, balance, already } / { ok: false, error }
+// ctx: { taskId, game?, state, winnerId, amount, reason?, persist?, guildId? }  ->  { ok, balance, already } / { ok: false, error }
 //   game:    'rumble_royale' (default) | 'number_guess' | ...; the point_log reason is "<game>_prize task #<id>"
 //   persist: false = don't save state.paid into scheduled_tasks (the check script has no task row)
+//   guildId: the server whose points are credited (left out = HΛVØCZ)
 async function payout(ctx, deps = {}) {
   const pts = deps.points || points;
   const db = deps.db || supabase;
   const { taskId, state, amount } = ctx;
+  const guildId = guilds.gid(ctx.guildId);
   const game = ctx.game || 'rumble_royale';
   const winnerId = String(ctx.winnerId ?? '');
   const reason = ctx.reason || `${game}_prize task #${taskId}`;
@@ -87,7 +90,7 @@ async function payout(ctx, deps = {}) {
   try {
     if (!/^\d{5,25}$/.test(winnerId)) throw new Error(`winner id "${winnerId}" is not a Discord user id`);
     if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error(`prize amount ${amount} is not a positive whole number`);
-    const { data, error } = await db.from('point_log').select('id').eq('reason', reason).limit(1);
+    const { data, error } = await db.from('point_log').select('id').eq('guild_id', guildId).eq('reason', reason).limit(1);
     if (error) throw new Error(`point_log check: ${error.message}`);
     const alreadyLogged = !!(data && data.length);
 
@@ -95,10 +98,10 @@ async function payout(ctx, deps = {}) {
     if (!alreadyLogged) {
       // read-back check only where the points module can read balances (always in the real bot)
       const canVerify = typeof pts.getBalance === 'function';
-      const before = canVerify ? await pts.getBalance(winnerId) : null;
-      balance = await pts.adjustPoints(winnerId, amount, reason); // atomic RPC: creates the user row, writes point_log
+      const before = canVerify ? await pts.getBalance(winnerId, guildId) : null;
+      balance = await pts.adjustPoints(winnerId, amount, reason, guildId); // atomic RPC: creates the user row, writes point_log
       if (canVerify) {
-        const after = await pts.getBalance(winnerId);
+        const after = await pts.getBalance(winnerId, guildId);
         if (after === null) throw new Error('credit not found: the winner has no users row after adjust_points');
         // ok when the balance grew by the prize, or matches what adjust_points returned (other points may land at the same moment)
         if (after - (before || 0) !== amount && after !== Number(balance)) {

@@ -2,6 +2,7 @@ const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const supabase = require('../db');
 const config = require('../config');
 const points = require('../points');
+const guilds = require('../guilds');
 
 const P = config.points;
 
@@ -10,10 +11,12 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const uid = interaction.user.id;
-    const { data: u } = await supabase.from('users').select('points').eq('user_id', uid).maybeSingle();
+    const guildId = guilds.gid(interaction);
+    const { data: u } = await supabase.from('users').select('points').eq('guild_id', guildId).eq('user_id', uid).maybeSingle();
     const { data: d } = await supabase
       .from('daily_stats')
       .select('*')
+      .eq('guild_id', guildId)
       .eq('user_id', uid)
       .eq('day', points.today())
       .maybeSingle();

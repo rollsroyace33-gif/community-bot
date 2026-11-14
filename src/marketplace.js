@@ -12,6 +12,7 @@ const {
 const supabase = require('./db');
 const config = require('./config');
 const points = require('./points');
+const guilds = require('./guilds');
 const { isAdmin, getTextChannel } = require('./utils');
 
 const EPHEMERAL = MessageFlags.Ephemeral;
@@ -46,8 +47,8 @@ function itemMessage(item) {
 // admin commands call them and stay unchanged) but no longer post public item cards.
 
 // /additem: nothing to post anymore (the new prize appears in Purchase); just make sure the header is there
-async function postItemCard(client) {
-  await ensureHeader(client);
+async function postItemCard(client, item) {
+  await ensureHeader(client, item?.guild_id);
 }
 
 // /edititem, refunds: no card to refresh (Purchase always reads fresh data)
@@ -63,19 +64,19 @@ async function deleteItemCard(client, item) {
 // /repostitem: remove the old card if any; the item is shown through the shop header instead
 async function repostItemCard(client, item) {
   await deleteItemCard(client, item);
-  await ensureHeader(client);
+  await ensureHeader(client, item.guild_id);
 }
 
 // /listitems "card ok": an active item is visible in the shop whenever the shop header exists
 async function cardExists(client, item) {
   if (!item.active) return false;
-  return !!(await findHeader(client));
+  return !!(await findHeader(client, item.guild_id));
 }
 
 // After a redeem: update the card, or remove it when sold out and AUTO_REMOVE_SOLD_OUT=true
-async function updateCardAfterRedeem(client, itemId, stockLeft) {
+async function updateCardAfterRedeem(client, itemId, stockLeft, guildId) {
   if (config.marketplace.autoRemoveSoldOut && stockLeft <= 0) {
-    const { data } = await supabase.from('items').update({ active: false }).eq('id', itemId).lte('stock', 0).select();
+    const { data } = await supabase.from('items').update({ active: false }).eq('guild_id', guilds.gid(guildId)).eq('id', itemId).lte('stock', 0).select();
     if (data && data[0]) return deleteItemCard(client, data[0]);
   }
   return refreshItemCard(client, itemId);
@@ -84,7 +85,7 @@ async function updateCardAfterRedeem(client, itemId, stockLeft) {
 // Autocomplete for item options: "#ID Name (price pts, stock N)", max 25
 async function autocompleteItems(interaction) {
   const typed = String(interaction.options.getFocused()).trim().toLowerCase().replace(/^#/, '');
-  const { data } = await supabase.from('items').select('id,name,price,stock').eq('active', true).order('id').limit(500);
+  const { data } = await supabase.from('items').select('id,name,price,stock').eq('guild_id', guilds.gid(interaction)).eq('active', true).order('id').limit(500);
   const choices = (data || [])
     .filter((i) => !typed || String(i.id).startsWith(typed) || i.name.toLowerCase().includes(typed))
     .slice(0, 25)
@@ -109,20 +110,21 @@ function headerMessage() {
 }
 
 // the saved header message, if it still exists and the bot posted it
-async function findHeader(client) {
-  const ch = await getTextChannel(client, config.channels.marketplace);
+async function findHeader(client, guildId) {
+  const ch = await getTextChannel(client, guilds.settings(guildId).channels.marketplace);
   if (!ch) return null;
-  const { data: saved } = await supabase.from('bot_settings').select('value').eq('key', HEADER_KEY).maybeSingle();
+  const { data: saved } = await supabase.from('bot_settings').select('value').eq('guild_id', guilds.gid(guildId)).eq('key', HEADER_KEY).maybeSingle();
   if (!saved?.value) return null;
   const msg = await ch.messages.fetch(saved.value).catch(() => null);
   return msg && msg.author?.id === client.user.id ? msg : null;
 }
 
 // Edit the header in place if the bot already posted one, otherwise post it once (and remember its id)
-async function ensureHeader(client) {
-  const ch = await getTextChannel(client, config.channels.marketplace);
-  if (!ch) throw new Error('MARKETPLACE_CHANNEL_ID is wrong or the bot cannot see that channel.');
-  const { data: saved, error } = await supabase.from('bot_settings').select('value').eq('key', HEADER_KEY).maybeSingle();
+async function ensureHeader(client, guildId) {
+  const s = guilds.settings(guildId);
+  const ch = await getTextChannel(client, s.channels.marketplace);
+  if (!ch) throw new Error(s.isHome ? 'MARKETPLACE_CHANNEL_ID is wrong or the bot cannot see that channel.' : 'The marketplace channel is not set or I cannot see it. Run /setup.');
+  const { data: saved, error } = await supabase.from('bot_settings').select('value').eq('guild_id', s.guildId).eq('key', HEADER_KEY).maybeSingle();
   if (error) throw new Error(`Could not read bot_settings (did you run the new SQL in Supabase?): ${error.message}`);
   const old = saved?.value ? await ch.messages.fetch(saved.value).catch(() => null) : null;
   if (old && old.author?.id === client.user.id) {
@@ -130,7 +132,7 @@ async function ensureHeader(client) {
     return { message: old, posted: false };
   }
   const msg = await ch.send(headerMessage());
-  const { error: saveErr } = await supabase.from('bot_settings').upsert({ key: HEADER_KEY, value: msg.id });
+  const { error: saveErr } = await supabase.from('bot_settings').upsert({ guild_id: s.guildId, key: HEADER_KEY, value: msg.id }, { onConflict: 'guild_id,key' });
   if (saveErr) throw saveErr;
   return { message: msg, posted: true };
 }
@@ -144,8 +146,8 @@ function isOldItemCard(msg, botId) {
 }
 
 // Delete old item cards in the shop channel (bot-posted only). Returns how many were removed.
-async function removeOldItemCards(client) {
-  const ch = await getTextChannel(client, config.channels.marketplace);
+async function removeOldItemCards(client, guildId) {
+  const ch = await getTextChannel(client, guilds.settings(guildId).channels.marketplace);
   if (!ch) return 0;
   let removed = 0;
   let before;
@@ -164,35 +166,35 @@ async function removeOldItemCards(client) {
 }
 
 // Startup + /setupmarketplace: header in place, old item cards gone. Never posts item cards.
-async function syncShop(client) {
-  const { posted } = await ensureHeader(client);
-  const removed = await removeOldItemCards(client);
+async function syncShop(client, guildId) {
+  const { posted } = await ensureHeader(client, guildId);
+  const removed = await removeOldItemCards(client, guildId);
   console.log(`Marketplace: header ${posted ? 'posted' : 'updated in place'}, removed ${removed} old item card(s).`);
   return { posted, removed };
 }
 
 // /setupmarketplace keeps its reply text; no item cards are reposted anymore, so the count is 0
-async function setupHeader(client) {
-  await syncShop(client);
+async function setupHeader(client, guildId) {
+  await syncShop(client, guildId);
   return 0;
 }
 
-const balanceOf = async (userId) => {
-  const { data: u, error } = await supabase.from('users').select('points').eq('user_id', userId).maybeSingle();
+const balanceOf = async (userId, guildId) => {
+  const { data: u, error } = await supabase.from('users').select('points').eq('guild_id', guilds.gid(guildId)).eq('user_id', userId).maybeSingle();
   if (error) throw error;
   return u?.points ?? 0;
 };
 
 async function handleMyPoints(interaction) {
   await interaction.deferReply({ flags: EPHEMERAL });
-  const balance = await balanceOf(interaction.user.id);
+  const balance = await balanceOf(interaction.user.id, guilds.gid(interaction));
   const embed = new EmbedBuilder().setTitle('🪙 Your Points').setDescription(`You have **${balance}** points.`).setColor(0xf1c40f);
   return interaction.editReply({ embeds: [embed] });
 }
 
 // ---------------------------------------------------------------- logs
-async function sendLog(client, { purchaseId, userId, itemName, price, status, note }) {
-  const ch = await getTextChannel(client, config.channels.redeemLogs);
+async function sendLog(client, { purchaseId, userId, itemName, price, status, note, guildId }) {
+  const ch = await getTextChannel(client, guilds.settings(guildId).channels.redeemLogs);
   if (!ch) return;
   const embed = new EmbedBuilder()
     .setTitle(`Purchase #${purchaseId}`)
@@ -208,7 +210,7 @@ async function sendLog(client, { purchaseId, userId, itemName, price, status, no
   await ch.send({ embeds: [embed] }).catch((e) => console.error('log send:', e.message));
 }
 
-async function sendTranscript(client, channel, purchaseId) {
+async function sendTranscript(client, channel, purchaseId, guildId) {
   try {
     const msgs = await channel.messages.fetch({ limit: 100 });
     const lines = [...msgs.values()].reverse().map((m) => {
@@ -218,7 +220,7 @@ async function sendTranscript(client, channel, purchaseId) {
     const file = new AttachmentBuilder(Buffer.from(lines.join('\n') || '(empty)', 'utf8'), {
       name: `ticket-${purchaseId}.txt`,
     });
-    const logCh = await getTextChannel(client, config.channels.redeemLogs);
+    const logCh = await getTextChannel(client, guilds.settings(guildId).channels.redeemLogs);
     if (logCh) await logCh.send({ content: `Transcript: purchase #${purchaseId}`, files: [file] });
   } catch (e) {
     console.error('transcript:', e.message);
@@ -227,10 +229,10 @@ async function sendTranscript(client, channel, purchaseId) {
 
 // ---------------------------------------------------------------- redeem
 // Build the "not enough points" text here so it doesn't depend on the SQL function's wording
-async function redeemFailMessage(userId, itemId, dbMessage) {
+async function redeemFailMessage(userId, itemId, dbMessage, guildId) {
   const [{ data: item }, { data: user }] = await Promise.all([
-    supabase.from('items').select('price,stock,active').eq('id', itemId).maybeSingle(),
-    supabase.from('users').select('points').eq('user_id', userId).maybeSingle(),
+    supabase.from('items').select('price,stock,active').eq('guild_id', guilds.gid(guildId)).eq('id', itemId).maybeSingle(),
+    supabase.from('users').select('points').eq('guild_id', guilds.gid(guildId)).eq('user_id', userId).maybeSingle(),
   ]);
   if (!item || !item.active) return 'Item not found.';
   if (item.stock <= 0) return '❌ This item is out of stock.';
@@ -243,14 +245,16 @@ async function redeemFailMessage(userId, itemId, dbMessage) {
 // purchase), then the same follow-up steps as always (card update, role auto-delivery, redeem log).
 // Returns { ok: false, message } or { ok: true, data, delivered } where delivered = role given automatically.
 async function redeem(interaction, itemId) {
+  const guildId = guilds.gid(interaction);
   const { data, error } = await supabase.rpc('redeem_item', {
+    p_guild: guildId,
     p_user: interaction.user.id,
     p_item: itemId,
   });
   if (error) throw error;
-  if (!data.ok) return { ok: false, message: await redeemFailMessage(interaction.user.id, itemId, data.message) };
+  if (!data.ok) return { ok: false, message: await redeemFailMessage(interaction.user.id, itemId, data.message, guildId) };
 
-  await updateCardAfterRedeem(interaction.client, itemId, data.stock);
+  await updateCardAfterRedeem(interaction.client, itemId, data.stock, guildId);
 
   // Role items are delivered automatically
   if (data.item_type === 'role' && data.role_id) {
@@ -259,6 +263,7 @@ async function redeem(interaction, itemId) {
       await supabase
         .from('purchases')
         .update({ status: 'delivered', delivered_at: new Date().toISOString() })
+        .eq('guild_id', guildId)
         .eq('id', data.purchase_id);
       await sendLog(interaction.client, {
         purchaseId: data.purchase_id,
@@ -267,6 +272,7 @@ async function redeem(interaction, itemId) {
         price: data.price,
         status: 'Delivered',
         note: 'Role auto delivered.',
+        guildId,
       });
       return { ok: true, data, delivered: true };
     } catch (e) {
@@ -281,6 +287,7 @@ async function redeem(interaction, itemId) {
     itemName: data.item_name,
     price: data.price,
     status: 'Pending',
+    guildId,
   });
   return { ok: true, data, delivered: false };
 }
@@ -297,6 +304,9 @@ async function handleRedeem(interaction, itemId) {
   if (!res.ok) return interaction.editReply(res.message);
   const { data } = res;
   if (res.delivered) return interaction.editReply(`✅ You redeemed ${data.item_name} successfully! ${data.price} points were deducted.`);
+  // other servers: their own claim instructions, no ticket button (HΛVØCZ keeps its wording and button)
+  const claimText = guilds.settings(interaction).ticketInstructions;
+  if (claimText) return interaction.editReply(`✅ You redeemed ${data.item_name} successfully! ${data.price} points were deducted.\n${claimText}`);
   return interaction.editReply({
     content: `✅ You redeemed ${data.item_name} successfully! ${data.price} points were deducted.\nOpen a ticket to claim your prize 👇`,
     components: [ticketButton(data.purchase_id)],
@@ -316,8 +326,8 @@ const stockText = (i) => (i.stock > 0 ? `${i.stock} left` : 'Sold out');
 const receiptNo = (id) => `#${String(id).padStart(6, '0')}`;
 const unix = (d) => Math.floor(new Date(d).getTime() / 1000);
 
-async function activeItems() {
-  const { data, error } = await supabase.from('items').select('*').eq('active', true).order('id');
+async function activeItems(guildId) {
+  const { data, error } = await supabase.from('items').select('*').eq('guild_id', guilds.gid(guildId)).eq('active', true).order('id');
   if (error) throw error;
   return data || [];
 }
@@ -404,16 +414,18 @@ function receiptEmbed(r, { title = '🧾 Purchase Receipt', staff = false } = {}
   if (staff) e.addFields({ name: 'Buyer', value: `${r.buyerName.slice(0, 100)} (ID ${r.userId})`, inline: false });
   if (r.ticketChannelId) e.addFields({ name: 'Ticket', value: `<#${r.ticketChannelId}>`, inline: false });
   else if (r.delivered) e.addFields({ name: 'Delivery', value: 'Role delivered automatically.', inline: false });
-  else if (!staff) e.addFields({ name: 'Next step', value: 'Open a ticket to claim your prize 👇', inline: false });
-  else e.addFields({ name: 'Delivery', value: 'Pending: the member opens a ticket.', inline: false });
+  else if (!staff) e.addFields({ name: 'Next step', value: r.claimText ? String(r.claimText).slice(0, 1024) : 'Open a ticket to claim your prize 👇', inline: false });
+  else e.addFields({ name: 'Delivery', value: r.claimText ? 'Pending: the member follows the claim instructions.' : 'Pending: the member opens a ticket.', inline: false });
   return e;
 }
 
 // staff copy in RECEIPT_CHANNEL_ID. Never throws, never blocks or undoes a purchase, never pings.
 async function postStaffReceipt(client, r) {
   try {
-    if (!config.channels.receipts) return console.warn('Marketplace: RECEIPT_CHANNEL_ID is empty, staff receipt copy skipped.');
-    const ch = await getTextChannel(client, config.channels.receipts);
+    const s = guilds.settings(r.guildId);
+    if (!s.isHome && !s.channels.receipts) return; // other servers: the purchase log in their logs channel is the staff copy
+    if (!s.channels.receipts) return console.warn('Marketplace: RECEIPT_CHANNEL_ID is empty, staff receipt copy skipped.');
+    const ch = await getTextChannel(client, s.channels.receipts);
     if (!ch) return console.warn('Marketplace: RECEIPT_CHANNEL_ID is not reachable (wrong ID or no access), staff receipt copy skipped.');
     await ch.send({ embeds: [receiptEmbed(r, { title: '🧾 New purchase', staff: true })], allowedMentions: { parse: [] } });
   } catch (e) {
@@ -441,6 +453,8 @@ async function postReceiptInTicket(channel, purchase) {
 // c) Confirm: re-checks points + stock through the existing purchase; one purchase per click, ever
 async function shopBuy(interaction, itemId, page) {
   const uid = interaction.user.id;
+  const guildId = guilds.gid(interaction);
+  const claimText = guilds.settings(interaction).ticketInstructions; // null in HΛVØCZ (ticket button as always)
   const msgId = interaction.message?.id;
   if (buying.has(uid)) return; // a second click while the first is running: ignored (already acknowledged)
   if (msgId && boughtOn.has(msgId)) return; // a late click on a shop message that already completed a purchase
@@ -454,7 +468,7 @@ async function shopBuy(interaction, itemId, page) {
       return interaction.editReply({ content: `${res.message}\nNothing was changed.`, embeds: [], components: [back] });
     }
     const { data } = res;
-    const after = await balanceOf(uid).catch(() => null);
+    const after = await balanceOf(uid, guildId).catch(() => null);
     const r = {
       purchaseId: data.purchase_id,
       itemName: data.item_name,
@@ -466,6 +480,8 @@ async function shopBuy(interaction, itemId, page) {
       buyerName: interaction.member?.displayName || interaction.user.username,
       delivered: res.delivered,
       ticketChannelId: null,
+      guildId,
+      claimText,
     };
     receipts.set(data.purchase_id, r);
     if (msgId) {
@@ -473,7 +489,7 @@ async function shopBuy(interaction, itemId, page) {
       if (boughtOn.size > 2000) boughtOn.delete(boughtOn.values().next().value); // keep it small
     }
     // the receipt replaces the Confirm button, so the same purchase can't be clicked again
-    await interaction.editReply({ content: '', embeds: [receiptEmbed(r)], components: res.delivered ? [] : [ticketButton(data.purchase_id)] });
+    await interaction.editReply({ content: '', embeds: [receiptEmbed(r)], components: res.delivered || claimText ? [] : [ticketButton(data.purchase_id)] });
     await postStaffReceipt(interaction.client, r);
   } finally {
     buying.delete(uid);
@@ -483,20 +499,21 @@ async function shopBuy(interaction, itemId, page) {
 // every shop:* button and the shop select menu (routed from interactionCreate). Never throws.
 async function handleShop(interaction) {
   const [, action, a, b] = interaction.customId.split(':');
+  const guildId = guilds.gid(interaction);
   try {
     if (action === 'open') {
       await interaction.deferReply({ flags: EPHEMERAL }); // acknowledged right away
-      const [items, balance] = await Promise.all([activeItems(), balanceOf(interaction.user.id)]);
+      const [items, balance] = await Promise.all([activeItems(guildId), balanceOf(interaction.user.id, guildId)]);
       return await interaction.editReply(shopPage(items, balance, 0));
     }
     await interaction.deferUpdate(); // the ephemeral shop message is updated in place
     if (action === 'page' || action === 'back') {
-      const [items, balance] = await Promise.all([activeItems(), balanceOf(interaction.user.id)]);
+      const [items, balance] = await Promise.all([activeItems(guildId), balanceOf(interaction.user.id, guildId)]);
       return await interaction.editReply(shopPage(items, balance, Number(a) || 0));
     }
     if (action === 'pick') {
       const id = Number(interaction.values?.[0]);
-      const [items, balance] = await Promise.all([activeItems(), balanceOf(interaction.user.id)]);
+      const [items, balance] = await Promise.all([activeItems(guildId), balanceOf(interaction.user.id, guildId)]);
       const item = items.find((i) => i.id === id);
       if (!item) return await interaction.editReply(shopPage(items, balance, Number(a) || 0));
       return await interaction.editReply(itemDetail(item, balance, Number(a) || 0));
@@ -514,8 +531,11 @@ async function handleShop(interaction) {
 async function handleOpenTicket(interaction, purchaseId) {
   await interaction.deferReply({ flags: EPHEMERAL });
   if (!Number.isInteger(purchaseId)) return interaction.editReply('Invalid purchase ID.');
+  const s = guilds.settings(interaction);
+  // other servers have no ticket channels from the bot: they get their own claim instructions
+  if (s.ticketInstructions) return interaction.editReply(s.ticketInstructions);
 
-  const { data: p } = await supabase.from('purchases').select('*').eq('id', purchaseId).maybeSingle();
+  const { data: p } = await supabase.from('purchases').select('*').eq('guild_id', s.guildId).eq('id', purchaseId).maybeSingle();
   if (!p || p.user_id !== interaction.user.id) return interaction.editReply('This is not your purchase.');
   if (p.status !== 'pending') return interaction.editReply(`This purchase's status is: **${p.status}**.`);
 
@@ -527,6 +547,7 @@ async function handleOpenTicket(interaction, purchaseId) {
   const { data: lock } = await supabase
     .from('purchases')
     .update({ ticket_channel_id: 'creating' })
+    .eq('guild_id', s.guildId)
     .eq('id', purchaseId)
     .is('ticket_channel_id', null)
     .select();
@@ -555,9 +576,9 @@ async function handleOpenTicket(interaction, purchaseId) {
         ],
       },
     ];
-    if (config.adminRoleId) {
+    if (s.adminRoleId) {
       overwrites.push({
-        id: config.adminRoleId,
+        id: s.adminRoleId,
         allow: [
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
@@ -569,10 +590,10 @@ async function handleOpenTicket(interaction, purchaseId) {
     const channel = await guild.channels.create({
       name: `ticket-${purchaseId}`,
       type: ChannelType.GuildText,
-      parent: config.channels.ticketCategory || null,
+      parent: s.channels.ticketCategory || null,
       permissionOverwrites: overwrites,
     });
-    await supabase.from('purchases').update({ ticket_channel_id: channel.id }).eq('id', purchaseId);
+    await supabase.from('purchases').update({ ticket_channel_id: channel.id }).eq('guild_id', s.guildId).eq('id', purchaseId);
 
     const embed = new EmbedBuilder()
       .setTitle(`Ticket: Purchase #${purchaseId}`)
@@ -585,7 +606,7 @@ async function handleOpenTicket(interaction, purchaseId) {
         .setStyle(ButtonStyle.Success)
     );
     await channel.send({
-      content: `<@${interaction.user.id}>${config.adminRoleId ? ` <@&${config.adminRoleId}>` : ''}`,
+      content: `<@${interaction.user.id}>${s.adminRoleId ? ` <@&${s.adminRoleId}>` : ''}`,
       embeds: [embed],
       components: [row],
     });
@@ -593,7 +614,7 @@ async function handleOpenTicket(interaction, purchaseId) {
 
     return interaction.editReply(`🎫 Ticket opened: <#${channel.id}>`);
   } catch (err) {
-    await supabase.from('purchases').update({ ticket_channel_id: null }).eq('id', purchaseId);
+    await supabase.from('purchases').update({ ticket_channel_id: null }).eq('guild_id', s.guildId).eq('id', purchaseId);
     throw err;
   }
 }
@@ -603,10 +624,12 @@ async function handleDeliver(interaction, purchaseId) {
     return interaction.reply({ content: 'Only admins can do this.', flags: EPHEMERAL });
   }
   await interaction.deferReply();
+  const guildId = guilds.gid(interaction);
 
   const { data } = await supabase
     .from('purchases')
     .update({ status: 'delivered', delivered_at: new Date().toISOString() })
+    .eq('guild_id', guildId)
     .eq('id', purchaseId)
     .eq('status', 'pending')
     .select();
@@ -622,17 +645,18 @@ async function handleDeliver(interaction, purchaseId) {
     price: p.price,
     status: 'Delivered',
     note: `Delivered by <@${interaction.user.id}>`,
+    guildId,
   });
   await interaction.editReply('✅ Delivered! This ticket will close in 15 seconds.');
 
   const channel = interaction.channel;
-  await sendTranscript(interaction.client, channel, p.id);
+  await sendTranscript(interaction.client, channel, p.id, guildId);
   setTimeout(() => channel.delete().catch(() => {}), 15000);
 }
 
 // ---------------------------------------------------------------- refund
-async function refundPurchase(client, purchaseId) {
-  const { data, error } = await supabase.rpc('refund_purchase', { p_purchase: purchaseId });
+async function refundPurchase(client, purchaseId, guildId) {
+  const { data, error } = await supabase.rpc('refund_purchase', { p_guild: guilds.gid(guildId), p_purchase: purchaseId });
   if (error) throw error;
   if (!data.ok) return data;
 
@@ -643,12 +667,13 @@ async function refundPurchase(client, purchaseId) {
     itemName: data.item_name,
     price: data.price,
     status: 'Refunded',
+    guildId,
   });
 
   if (data.ticket_channel_id && data.ticket_channel_id !== 'creating') {
     const ch = await getTextChannel(client, data.ticket_channel_id);
     if (ch) {
-      await sendTranscript(client, ch, purchaseId);
+      await sendTranscript(client, ch, purchaseId, guildId);
       await ch.delete().catch(() => {});
     }
   }

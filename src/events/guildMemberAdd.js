@@ -1,6 +1,7 @@
 const config = require('../config');
 const personality = require('../personality');
 const { getTextChannel } = require('../utils');
+const guilds = require('../guilds');
 
 // Needs the GuildMembers intent (index.js) AND "Server Members Intent" ON in the Developer Portal.
 
@@ -36,7 +37,7 @@ async function flushBulk(client) {
 module.exports = async function onGuildMemberAdd(member) {
   try {
     if (member.user.bot || !config.channels.welcome) return;
-    if (config.guildId && member.guild.id !== config.guildId) return;
+    if (!guilds.isHome(member.guild.id)) return; // new-member welcomes exist in the home server only
 
     const now = Date.now();
     for (const [id, t] of welcomed) if (now - t > REWELCOME_MS) welcomed.delete(id); // keep the map small

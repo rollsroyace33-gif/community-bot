@@ -64,7 +64,7 @@ async function bossTalksToOthers(message, client) {
 // THE gate. true = Vexo may reply to this message. Messages from anyone but the boss always pass
 // (members keep their normal rules). Logs why a boss message is ignored (no content, no ids but the channel).
 async function shouldVexoHandleBossMessage(message, client) {
-  if (!identity.isBoss(message.author)) return true; // compares trimmed id strings with BOSS_USER_ID
+  if (!identity.isBoss(message.author, message)) return true; // compares trimmed id strings with this server's boss id
   if (await addressedVia(message, client)) return true;
 
   let reason = 'not addressed to Vexo';

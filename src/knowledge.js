@@ -32,27 +32,35 @@ function warnOnce(what, err) {
 }
 
 // ---------------------------------------------------------------- taught facts
-let facts = []; // cache of active facts: [{ id, fact }]
+// Every server has its own facts. guildId is the last argument of every function (left out = HΛVØCZ).
+const guilds = require('./guilds');
+const factsByGuild = new Map(); // guildId -> [{ id, fact }] (active facts)
 
+// (re)load the active facts of every server; returns HΛVØCZ's list (startup log)
 async function loadFacts() {
   try {
-    const { data, error } = await supabase.from('vexo_knowledge').select('id,fact').eq('active', true).order('id');
+    const { data, error } = await supabase.from('vexo_knowledge').select('id,fact,guild_id').eq('active', true).order('id');
     if (error) throw error;
-    facts = data || [];
+    factsByGuild.clear();
+    for (const row of data || []) {
+      const id = guilds.gid(row.guild_id);
+      if (!factsByGuild.has(id)) factsByGuild.set(id, []);
+      factsByGuild.get(id).push({ id: row.id, fact: row.fact });
+    }
   } catch (err) {
     warnOnce('vexo_knowledge load', err);
   }
-  return facts;
+  return getFacts();
 }
 
-const getFacts = () => facts;
+const getFacts = (guildId) => factsByGuild.get(guilds.gid(guildId)) || [];
 const normalize = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-const findSameFact = (text) => facts.find((f) => normalize(f.fact) === normalize(text)) || null;
+const findSameFact = (text, guildId) => getFacts(guildId).find((f) => normalize(f.fact) === normalize(text)) || null;
 
-async function addFact(text, createdBy) {
+async function addFact(text, createdBy, guildId) {
   const { data, error } = await supabase
     .from('vexo_knowledge')
-    .insert({ fact: text, source: 'control channel', created_by: createdBy })
+    .insert({ guild_id: guilds.gid(guildId), fact: text, source: 'control channel', created_by: createdBy })
     .select('id,fact')
     .single();
   if (error) throw new Error(`vexo_knowledge insert: ${error.message}`);
@@ -60,23 +68,48 @@ async function addFact(text, createdBy) {
   return data;
 }
 
-async function editFact(id, text) {
-  const { data, error } = await supabase.from('vexo_knowledge').update({ fact: text }).eq('id', id).eq('active', true).select('id,fact');
+async function editFact(id, text, guildId) {
+  const { data, error } = await supabase
+    .from('vexo_knowledge')
+    .update({ fact: text })
+    .eq('guild_id', guilds.gid(guildId))
+    .eq('id', id)
+    .eq('active', true)
+    .select('id,fact');
   if (error) throw new Error(`vexo_knowledge update: ${error.message}`);
   await loadFacts();
   return data && data[0];
 }
 
 // soft delete: the row stays (active = false), so a mistake can be undone in Supabase
-async function forgetFact(id) {
-  const { data, error } = await supabase.from('vexo_knowledge').update({ active: false }).eq('id', id).eq('active', true).select('id,fact');
+async function forgetFact(id, guildId) {
+  const { data, error } = await supabase
+    .from('vexo_knowledge')
+    .update({ active: false })
+    .eq('guild_id', guilds.gid(guildId))
+    .eq('id', id)
+    .eq('active', true)
+    .select('id,fact');
   if (error) throw new Error(`vexo_knowledge forget: ${error.message}`);
   await loadFacts();
   return data && data[0];
 }
 
+// /knowledge clear: forget every taught fact of one server (soft delete). Returns how many.
+async function forgetAllFacts(guildId) {
+  const { data, error } = await supabase
+    .from('vexo_knowledge')
+    .update({ active: false })
+    .eq('guild_id', guilds.gid(guildId))
+    .eq('active', true)
+    .select('id');
+  if (error) throw new Error(`vexo_knowledge clear: ${error.message}`);
+  await loadFacts();
+  return (data || []).length;
+}
+
 // ---------------------------------------------------------------- unanswered questions
-let unanswered = null; // cache of unresolved rows, loaded on first use
+const unansweredByGuild = new Map(); // guildId -> unresolved rows, loaded on first use
 
 const STOP = new Set(
   'the a an is are was were be will what when where who why how which do does did can could should would of to for in on at it its this that i you we they my your our me us about any there have has tell please vexo ki kobe keno kothay kemne kivabe ar'.split(' ')
@@ -104,35 +137,42 @@ const scrub = (q) =>
     .trim()
     .slice(0, 300);
 
-async function loadUnanswered() {
-  if (unanswered) return unanswered;
+async function loadUnanswered(guildId) {
+  const id = guilds.gid(guildId);
+  if (unansweredByGuild.has(id)) return unansweredByGuild.get(id);
   const { data, error } = await supabase
     .from('vexo_unanswered')
     .select('id,question,times_asked')
+    .eq('guild_id', id)
     .eq('resolved', false)
     .order('times_asked', { ascending: false })
     .limit(500);
   if (error) throw error;
-  unanswered = data || [];
-  return unanswered;
+  unansweredByGuild.set(id, data || []);
+  return unansweredByGuild.get(id);
 }
 
 // Save a question Vexo couldn't answer (merged with near-duplicates). Never throws.
-async function recordUnanswered(question) {
+async function recordUnanswered(question, guildId) {
   try {
     const q = scrub(question);
     if (q.length < 5 || looksSecret(q)) return;
-    const list = await loadUnanswered();
+    const list = await loadUnanswered(guildId);
     const match = list.find((row) => similar(row.question, q));
     if (match) {
       match.times_asked += 1;
       const { error } = await supabase
         .from('vexo_unanswered')
         .update({ times_asked: match.times_asked, last_asked: new Date().toISOString() })
+        .eq('guild_id', guilds.gid(guildId))
         .eq('id', match.id);
       if (error) throw error;
     } else {
-      const { data, error } = await supabase.from('vexo_unanswered').insert({ question: q }).select('id,question,times_asked').single();
+      const { data, error } = await supabase
+        .from('vexo_unanswered')
+        .insert({ guild_id: guilds.gid(guildId), question: q })
+        .select('id,question,times_asked')
+        .single();
       if (error) throw error;
       list.push(data);
     }
@@ -141,21 +181,20 @@ async function recordUnanswered(question) {
   }
 }
 
-async function topUnanswered(limit = 10) {
-  const list = await loadUnanswered();
+async function topUnanswered(limit = 10, guildId) {
+  const list = await loadUnanswered(guildId);
   return [...list].sort((a, b) => b.times_asked - a.times_asked).slice(0, limit);
 }
 
-async function resolveUnanswered(ids) {
-  const list = await loadUnanswered();
+async function resolveUnanswered(ids, guildId) {
+  const list = await loadUnanswered(guildId);
   const valid = ids.filter((id) => list.some((row) => row.id === id));
   if (!valid.length) return [];
-  const { error } = await supabase.from('vexo_unanswered').update({ resolved: true }).in('id', valid);
+  const { error } = await supabase.from('vexo_unanswered').update({ resolved: true }).eq('guild_id', guilds.gid(guildId)).in('id', valid);
   if (error) throw new Error(`vexo_unanswered resolve: ${error.message}`);
-  unanswered = list.filter((row) => !valid.includes(row.id));
+  unansweredByGuild.set(guilds.gid(guildId), list.filter((row) => !valid.includes(row.id)));
   return valid;
 }
-
 module.exports = {
   looksSecret,
   loadFacts,
@@ -164,6 +203,7 @@ module.exports = {
   addFact,
   editFact,
   forgetFact,
+  forgetAllFacts,
   recordUnanswered,
   topUnanswered,
   resolveUnanswered,

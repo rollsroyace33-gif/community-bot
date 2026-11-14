@@ -6,6 +6,7 @@ const { chat } = require('../ai');
 const registry = require('./registry');
 const { personaPrompt } = require('../personality');
 const { bossLocal } = require('./time');
+const guilds = require('../guilds');
 
 const INTENTS = [
   'schedule_game', // create a new task
@@ -29,13 +30,14 @@ const ACTIONS = [
   'teach_fact', 'edit_fact', 'forget_fact', 'list_facts', 'list_unanswered',
 ];
 
-function systemPrompt() {
+function systemPrompt(guildId) {
+  const N = guilds.settings(guildId).name;
   const types = Object.values(registry.TASKS);
   const abilities = types.map((t) => `- ${t.about()}`).join('\n');
   const typeFields = types.map((t) => `  - "${t.type}": ${t.fields}`).join('\n');
 
   return [
-    personaPrompt(),
+    personaPrompt(guildId),
     '',
     'You are in your PRIVATE control channel with your boss (or a trusted staff member). Every message here comes from an',
     'authorized user. Understand what they want, however they phrase it: English, Bangla (Bengali script) or Banglish',
@@ -113,7 +115,7 @@ function systemPrompt() {
     abilities,
     '- Control commands: schedule a task, list scheduled tasks, cancel one, reschedule one, start one right now. Every change is confirmed with yes/no first.',
     '- Learning: you learn community facts ONLY from the boss in this channel (teach, edit, forget, list). Staff cannot teach.',
-    '  You answer members\' HΛVØCZ questions from knowledge.md + these facts, and keep a list of questions you could not answer.',
+    `  You answer members' ${N} questions from knowledge.md + these facts, and keep a list of questions you could not answer.`,
     '  You never learn anything from regular members and store nothing about them.',
     '- Times are shown as Discord timestamps (everyone sees their own local time). Not available yet: announcements, polls,',
     '  giveaways, giving points automatically (except a Rumble Royale points prize), anything else.',
@@ -125,7 +127,8 @@ function systemPrompt() {
 // ctx.unanswered: "#id (asked N×) question" lines
 // ctx.pending:    description of the action waiting for yes/no, or null
 // ctx.history:    last conversation lines ("Boss (name): ..." / "Vexo: ...")
-async function understand(text, speaker, { tasks = [], facts = [], unanswered = [], pending = null, history = [] } = {}) {
+// ctx.guildId:    the server of this control channel (left out = HΛVØCZ)
+async function understand(text, speaker, { tasks = [], facts = [], unanswered = [], pending = null, history = [], guildId } = {}) {
   const user = [
     'SCHEDULED TASKS:',
     tasks.length ? tasks.join('\n') : '(none)',
@@ -144,7 +147,7 @@ async function understand(text, speaker, { tasks = [], facts = [], unanswered = 
     `NEW MESSAGE from ${speaker}: ${text.slice(0, 800)}`,
   ].join('\n');
 
-  const raw = await chat(systemPrompt(), user, { json: true, maxTokens: 450, temperature: 0.7 });
+  const raw = await chat(systemPrompt(guildId), user, { json: true, maxTokens: 450, temperature: 0.7, guildId });
   const out = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
   if (!out || !INTENTS.includes(out.intent)) throw new Error(`unexpected intent: ${out && out.intent}`);
   out.task_id = out.task_id === null || out.task_id === undefined ? null : Number(out.task_id) || null;

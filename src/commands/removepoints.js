@@ -16,7 +16,7 @@ module.exports = {
     const user = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
     const reason = interaction.options.getString('reason') || 'admin remove';
-    const bal = await points.adjustPoints(user.id, -amount, `admin: ${reason}`);
+    const bal = await points.adjustPoints(user.id, -amount, `admin: ${reason}`, interaction.guildId);
     await interaction.editReply(`✅ Removed ${amount} points from <@${user.id}>. New balance: **${bal}**`);
   },
 };

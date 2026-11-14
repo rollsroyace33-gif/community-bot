@@ -1,5 +1,6 @@
 const supabase = require('./db');
 const config = require('./config');
+const guilds = require('./guilds');
 
 const P = config.points;
 
@@ -9,11 +10,13 @@ function fmt(date) {
 const today = () => fmt(new Date());
 const daysAgo = (n) => fmt(new Date(Date.now() - n * 86400000));
 
-// Anti-farming: account age + optional verified role
-function isEligible(member, user) {
+// Anti-farming: account age + optional verified role (the role of the member's own server)
+// guild: the server the message / reaction is in (a Message works). Left out = the member's own server.
+function isEligible(member, user, guild) {
   const ageDays = (Date.now() - user.createdTimestamp) / 86400000;
   if (ageDays < config.filters.minAccountAgeDays) return false;
-  if (config.verifiedRoleId && !member.roles.cache.has(config.verifiedRoleId)) return false;
+  const verifiedRoleId = guilds.settings(guild || member).verifiedRoleId;
+  if (verifiedRoleId && !member.roles.cache.has(verifiedRoleId)) return false;
   return true;
 }
 
@@ -23,8 +26,11 @@ async function rpc(name, args) {
   return data;
 }
 
-const recordMessage = (userId) =>
+// Every function below works on ONE server's points. guildId is the last argument
+// (left out = HΛVØCZ, the home server).
+const recordMessage = (userId, guildId) =>
   rpc('record_message', {
+    p_guild: guilds.gid(guildId),
     p_user: userId,
     p_day: today(),
     p_per_point: P.messagesPerPoint,
@@ -32,8 +38,9 @@ const recordMessage = (userId) =>
     p_total_cap: P.dailyCap,
   });
 
-const recordReaction = (messageId, userId) =>
+const recordReaction = (messageId, userId, guildId) =>
   rpc('record_reaction', {
+    p_guild: guilds.gid(guildId),
     p_message: messageId,
     p_user: userId,
     p_day: today(),
@@ -41,8 +48,9 @@ const recordReaction = (messageId, userId) =>
     p_total_cap: P.dailyCap,
   });
 
-const awardQuality = (userId, day, amount) =>
+const awardQuality = (userId, day, amount, guildId) =>
   rpc('award_points', {
+    p_guild: guilds.gid(guildId),
     p_user: userId,
     p_day: day,
     p_category: 'quality',
@@ -51,12 +59,17 @@ const awardQuality = (userId, day, amount) =>
     p_total_cap: P.dailyCap,
   });
 
-const adjustPoints = (userId, amount, reason) =>
-  rpc('adjust_points', { p_user: userId, p_amount: amount, p_reason: reason });
+const adjustPoints = (userId, amount, reason, guildId) =>
+  rpc('adjust_points', { p_guild: guilds.gid(guildId), p_user: userId, p_amount: amount, p_reason: reason });
 
 // users.points (the balance the shop and /points show), null = no user row yet. Used to verify prize payouts.
-async function getBalance(userId) {
-  const { data, error } = await supabase.from('users').select('points').eq('user_id', String(userId)).maybeSingle();
+async function getBalance(userId, guildId) {
+  const { data, error } = await supabase
+    .from('users')
+    .select('points')
+    .eq('guild_id', guilds.gid(guildId))
+    .eq('user_id', String(userId))
+    .maybeSingle();
   if (error) throw new Error(`balance read: ${error.message}`);
   return data ? Number(data.points) : null;
 }

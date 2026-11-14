@@ -73,7 +73,7 @@ for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
   const cmd = require(path.join(dir, file));
   client.commands.set(cmd.data.name, cmd);
 }
-step(`${client.commands.size} slash command module(s) loaded (registration is done separately by "npm run deploy")`);
+step(`${client.commands.size} slash command module(s) loaded (registered with Discord after login)`);
 
 // ---------------- Discord diagnostics ----------------
 let ready = false;
@@ -98,6 +98,41 @@ client.on(Events.Debug, (m) => {
 client.once(Events.ClientReady, async (c) => {
   ready = true;
   console.log(`[startup] step: READY, logged in as ${c.user.tag} (${c.user.id}), in ${c.guilds.cache.size} guild(s)`);
+
+  // ---- multi-server: load every server's row BEFORE anything reads settings (HΛVØCZ works from .env
+  // even if this fails), make sure every server the bot is in has a row, import knowledge.md once
+  const guilds = require('./guilds');
+  const loaded = await withTimeout('guilds load (Supabase)', () => guilds.load(), null);
+  step(loaded === null ? 'guilds NOT loaded (see error above): only the home server will work' : `guilds loaded: ${loaded} server row(s)`);
+  if (loaded !== null) {
+    for (const guild of c.guilds.cache.values()) {
+      try {
+        const known = !!guilds.get(guild.id);
+        const { created } = await guilds.join(guild);
+        // a server that added the bot while it was offline: run its automatic setup now
+        if (!known && created && !guilds.isHome(guild.id)) await require('./setup').run(guild, { welcome: true });
+      } catch (e) {
+        console.error(`[startup] guild ${guild.id} row:`, e.message);
+      }
+    }
+    // servers that already had Vexo get channels that were added to the automatic setup since (once, never HΛVØCZ)
+    const up = await withTimeout('setup upgrade', () => require('./setup').upgradeExisting(c), null, 60000);
+    if (up && (up.upgraded.length || up.failed.length)) step(`setup upgrade: ${up.upgraded.length} server(s) updated, ${up.failed.length} failed`);
+    const imported = await withTimeout('knowledge import', () => require('./ai').importHomeKnowledge(), 'skipped');
+    step(`home knowledge: ${imported === 'imported' ? 'knowledge.md imported into the database' : imported === 'already' ? 'already in the database' : 'using knowledge.md (not imported)'}`);
+  }
+  // slash commands: registered by the bot itself on every start, in two separate steps (global for all
+  // servers, then the home-only /admin). A home server the bot is not in never blocks the global commands.
+  withTimeout('slash command registration', () => require('./deploy-commands').registerCommands(c), null, 30000).then((r) => {
+    if (r) require('./deploy-commands').logResult(r);
+    else step('slash commands NOT registered (timed out); run "npm run deploy" to retry');
+  });
+  try {
+    require('./jobs/expiry').start(client); // trial / paid period reminders (hourly)
+    step('expiry reminders started');
+  } catch (e) {
+    console.error('[startup] expiry reminders failed:', e.stack);
+  }
 
   // none of these can block or crash the bot; each logs its own start/end/timeout
   try {
@@ -133,6 +168,30 @@ client.once(Events.ClientReady, async (c) => {
       step('boss presence loaded');
     })(),
     (async () => {
+      // giveaways live in the database: start the end-time timer and end any that expired while offline
+      step('starting giveaway timer...');
+      await withTimeout('giveaway timer', () => require('./giveaway').startTimer(client), undefined, 60000);
+      step('giveaway timer started');
+    })(),
+    (async () => {
+      // SOL Radar: off by itself (with one clear warning) when COINGECKO_API_KEY is empty; never blocks startup
+      try {
+        const on = require('./solRadar').startTimer(client);
+        step(on ? 'SOL Radar timer started' : 'SOL Radar is off (no market data key)');
+      } catch (e) {
+        console.error('[startup] SOL Radar failed to start:', e.stack);
+      }
+    })(),
+    (async () => {
+      // NFT Radar: off by itself (one clear warning) when TAVILY_API_KEY is empty; never blocks startup
+      try {
+        const on = require('./nftRadar').startTimer(client);
+        step(on ? 'NFT Radar timer started' : 'NFT Radar is off (no TAVILY_API_KEY)');
+      } catch (e) {
+        console.error('[startup] NFT Radar failed to start:', e.stack);
+      }
+    })(),
+    (async () => {
       step('loading knowledge (Supabase)...');
       const f = await withTimeout('knowledge load (Supabase)', () => require('./knowledge').loadFacts(), null);
       step(f ? `knowledge loaded: ${f.length} taught fact(s)` : 'knowledge NOT loaded (see error above)');
@@ -157,6 +216,9 @@ client.on(Events.MessageCreate, require('./events/messageCreate'));
 client.on(Events.MessageReactionAdd, require('./events/reactionAdd'));
 client.on(Events.InteractionCreate, require('./events/interactionCreate'));
 client.on(Events.GuildMemberAdd, require('./events/guildMemberAdd'));
+client.on(Events.GuildCreate, require('./events/guildCreate')); // added to a server: row + trial + automatic setup
+client.on(Events.GuildDelete, require('./events/guildDelete')); // removed: the row is kept, only marked
+client.on(Events.ChannelDelete, (channel) => require('./setup').onChannelDelete(channel)); // a configured channel was deleted
 step('event handlers registered');
 
 // tiny web server so Render (Web Service) sees an open port + uptime pings work.
@@ -182,6 +244,10 @@ async function shutdown(signal) {
   setTimeout(() => process.exit(0), 10000).unref(); // never hang past Render's grace period
   stopTaskScheduler();
   stopScheduler();
+  require('./jobs/expiry').stop();
+  require('./giveaway').stopTimer(); // running giveaways stay in the database and continue after the restart
+  require('./solRadar').stopTimer(); // posted updates are remembered in the database: nothing is posted twice
+  require('./nftRadar').stopTimer(); // runs and approval requests are in the database: nothing is repeated
   server.close();
   try {
     await client.destroy();

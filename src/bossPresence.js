@@ -3,29 +3,45 @@
 //                  existing bot_settings table (one key, a timestamp, nothing about members), so a
 //                  restart can never cause a false welcome.
 //   lastSeenAt:    any channel including the control channel ("is the boss around right now").
-// The boss is recognized by the caller (BOSS_USER_ID only).
+// The boss is recognized by the caller (user ID only). Every server has its own boss, so both
+// timestamps are kept per server (guildId left out = HΛVØCZ).
 const supabase = require('./db');
 const clock = require('./clock');
+const guilds = require('./guilds');
 
 const KEY = 'boss_last_message_at';
-let lastMessageAt = null; // ms
-let lastSeenAt = null; // ms
+const states = new Map(); // guildId -> { lastMessageAt (ms | null), lastSeenAt (ms | null) }
 
-// read the saved timestamp once at startup; nothing saved / an error = unknown = no welcome
+function stateOf(guildId) {
+  const id = guilds.gid(guildId);
+  if (!states.has(id)) states.set(id, { lastMessageAt: null, lastSeenAt: null });
+  return states.get(id);
+}
+
+// read the saved timestamps once at startup; nothing saved / an error = unknown = no welcome
 async function load() {
   try {
-    const { data, error } = await supabase.from('bot_settings').select('value').eq('key', KEY).maybeSingle();
+    const { data, error } = await supabase.from('bot_settings').select('guild_id,value').eq('key', KEY);
     if (error) throw new Error(error.message);
-    const t = Number(data?.value);
-    if (Number.isFinite(t) && t > 0) lastMessageAt = Math.max(lastMessageAt || 0, t);
+    // (a single row object is also accepted: older test doubles answer every query with one row)
+    const list = Array.isArray(data) ? data : data ? [data] : [];
+    for (const row of list) {
+      const t = Number(row?.value);
+      const st = stateOf(row?.guild_id);
+      if (Number.isFinite(t) && t > 0) st.lastMessageAt = Math.max(st.lastMessageAt || 0, t);
+    }
   } catch (err) {
     console.error('boss presence load:', err.message);
   }
 }
 
-function save(t) {
+function save(guildId, t) {
   Promise.resolve()
-    .then(() => supabase.from('bot_settings').upsert({ key: KEY, value: String(t), updated_at: new Date(t).toISOString() }))
+    .then(() =>
+      supabase
+        .from('bot_settings')
+        .upsert({ guild_id: guilds.gid(guildId), key: KEY, value: String(t), updated_at: new Date(t).toISOString() }, { onConflict: 'guild_id,key' })
+    )
     .then((res) => res?.error && console.error('boss presence save:', res.error.message))
     .catch((err) => console.error('boss presence save:', err.message));
 }
@@ -33,22 +49,26 @@ function save(t) {
 // Call for EVERY boss message, before anything is sent. Returns the gap since his previous message
 // (ms, outside the control channel) or null when unknown. Updated immediately, so the same return is
 // never welcomed twice.
-function note({ isControl = false } = {}) {
+function note({ isControl = false, guildId } = {}) {
+  const st = stateOf(guildId);
   const now = clock.now();
-  lastSeenAt = now;
+  st.lastSeenAt = now;
   if (isControl) return null;
-  const prev = lastMessageAt;
-  lastMessageAt = now;
-  save(now);
+  const prev = st.lastMessageAt;
+  st.lastMessageAt = now;
+  save(guildId, now);
   return prev === null ? null : now - prev;
 }
 
-// the boss wrote anything (any channel) within the last N minutes
-const recentlyActive = (minutes) => lastSeenAt !== null && clock.now() - lastSeenAt < minutes * 60 * 1000;
+// the boss wrote anything (any channel of that server) within the last N minutes
+function recentlyActive(minutes, guildId) {
+  const st = stateOf(guildId);
+  return st.lastSeenAt !== null && clock.now() - st.lastSeenAt < minutes * 60 * 1000;
+}
 
 module.exports = {
   load,
   note,
   recentlyActive,
-  _test: { reset: () => ((lastMessageAt = null), (lastSeenAt = null)), get: () => ({ lastMessageAt, lastSeenAt }) },
+  _test: { reset: () => states.clear(), get: () => ({ ...stateOf() }) },
 };

@@ -2,6 +2,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('disc
 const supabase = require('../db');
 const marketplace = require('../marketplace');
 const { isAdmin } = require('../utils');
+const guilds = require('../guilds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -38,6 +39,7 @@ module.exports = {
     const { data: item, error } = await supabase
       .from('items')
       .insert({
+        guild_id: guilds.gid(interaction),
         name: interaction.options.getString('name'),
         price: interaction.options.getInteger('price'),
         stock: interaction.options.getInteger('stock'),

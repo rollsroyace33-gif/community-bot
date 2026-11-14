@@ -12,7 +12,7 @@ module.exports = {
     if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const id = interaction.options.getInteger('purchase_id');
-    const r = await marketplace.refundPurchase(interaction.client, id);
+    const r = await marketplace.refundPurchase(interaction.client, id, interaction.guildId);
     if (!r.ok) return interaction.editReply(r.message);
     await interaction.editReply(`✅ Purchase #${id} has been refunded: ${r.price} points returned to <@${r.user_id}>.`);
   },

@@ -2,6 +2,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('disc
 const supabase = require('../db');
 const marketplace = require('../marketplace');
 const { isAdmin } = require('../utils');
+const guilds = require('../guilds');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -15,7 +16,7 @@ module.exports = {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const id = interaction.options.getInteger('id');
-    const { data: item, error } = await supabase.from('items').select('*').eq('id', id).eq('active', true).maybeSingle();
+    const { data: item, error } = await supabase.from('items').select('*').eq('guild_id', guilds.gid(interaction)).eq('id', id).eq('active', true).maybeSingle();
     if (error) throw error;
     if (!item) return interaction.editReply('Item not found.');
 

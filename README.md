@@ -366,3 +366,124 @@ AI switch: `AI_PROVIDER=openai` or `anthropic`.
 1. Add a test prize (price 1) with `/additem`, give yourself points with `/addpoints`, then click **Purchase** in `#marketplace` to test the full flow.
 2. Write a few messages, then check `/points`.
 3. Test the nightly job right away with `/rundaily force:true`.
+
+## Multi-server (free / premium)
+
+Vexo can run in many servers. The home server (`HOME_GUILD_ID`) keeps every setting from `.env`, always has
+every feature, and nothing is auto-created there. Every other server has its own row in the `guilds` table
+(channels, boss, knowledge, plan) and fully separate data (`guild_id` on every table).
+
+- Database: run `supabase/schema.sql` (new installs), then `supabase/migration_multiserver.sql` (re-runnable).
+- Plans: the feature map is in `src/config.js` (`features`). `src/plans.js` has `hasFeature(guild, feature)`.
+  Free features never call the AI. A new server gets one trial (`TRIAL_DAYS`).
+- New servers: automatic setup on join (`src/setup.js`), then `/setup`, `/status`, `/help`, `/knowledge`,
+  `/automod`, `/guess`, `/rumble`. Owner only, home server only: `/admin activate | deactivate | extendtrial | list`.
+- Slash commands are registered globally by the bot itself on every start (`npm run deploy` still works).
+- Tests: `npm test` (offline). `tests/prompt-snapshot.test.js` proves the home server's AI prompts are unchanged;
+  `tests/multiserver.test.js` covers data separation, plans, zero AI in free servers, auto mod, knowledge sources.
+  (`npm run test:qa` makes a few real AI calls.)
+
+## X posts channel per server + scam protection
+
+Database: after `migration_multiserver.sql`, run `supabase/migration_scam_xdrop.sql` (re-runnable).
+
+- **X posts channel**: the automatic setup creates `x-posts`; `/setup` > "X posts channel" changes it. Same rules as
+  the home server (`X_DROP_POINTS`, `X_DROP_MAX_PER_DAY`, one credit per X post per server). Premium (points).
+  The home server keeps `X_DROP_CHANNEL_ID` from `.env`.
+- **Scam protection** (`src/scam.js`, part of premium auto mod). Rules first (no AI), the AI only for
+  "suspicious but not certain" messages (counted toward the server's daily AI limit).
+  - scam: message deleted + member kicked. Serious (phishing / drainer link, impersonation, several channels,
+    repeat after a kick): banned. Unsure: nothing is done to the member, an alert with Kick / Ban / Ignore
+    buttons goes to the logs channel.
+  - never checked: owner, admins, moderators, the boss, staff and trusted roles, bots. GIFs, media, X, YouTube
+    and allow-listed sites are never scam links.
+  - members report by replying to a message with the word "scam"; Vexo runs its own check, the report alone is
+    never enough.
+  - `/automod scam on:<true|false> mode:<auto|alert>`, `/automod scamphrase`, `/automod trustrole`,
+    `/automod allowlink`, and `/automod test text:<...>` (dry run).
+  - default: ON (auto) in customer servers, OFF in the home server.
+- **Permissions**: the bot now also needs Kick Members and Ban Members (invite permissions number
+  `1099780320342`, which since the giveaway feature also includes Attach Files), and its role must be above the
+  member roles.
+- Tests: `npm run test:scam`.
+
+## Giveaways
+
+Database: after `migration_scam_xdrop.sql`, run `supabase/migration_giveaway.sql` (re-runnable, two new tables only).
+
+- **What it is** (`src/giveaway.js`, command in `src/commands/giveaway.js`): one box in the giveaway channel with
+  the prize, winners, end time, required role, host, a live entry count, an optional large picture and a **Join**
+  button. One entry per member (database key). Pressing Join again offers **Leave**.
+- **`/giveaway start`** (free, zero AI calls): `prize`, `duration` (`30m`, `2h`, `1d`) or `end` (`9 pm`,
+  `tomorrow 8 pm`), `winners`, `image`, `required_role`, `ping_role`, `points_prize`, `channel`.
+  Also `/giveaway end`, `/giveaway reroll`, `/giveaway cancel`, `/giveaway list`. Manage Server or the boss.
+- **Control channel order** (premium, `giveaway_orders`): "host a giveaway for 1 NFT, 24 hours, 2 winners, only for
+  the Verified role" with a picture attached. If the prize or the duration is missing Vexo asks once, then posts
+  and answers with a link.
+- **Ending**: winners are picked with a cryptographically secure random choice; members who left or lost the
+  required role are skipped. The box is edited to "Ended" and a NEW message announces the winners with
+  **@everyone** (always, in every server; the ping role is only used at the start). A points prize is added
+  automatically, any other prize is claimed with the server's ticket instructions. Cancels never ping.
+- **Restarts**: everything is in the database. On startup running giveaways continue, and any that expired while
+  the bot was offline end right away.
+- **Channel**: the automatic setup creates `giveaways`; `/setup` > "Giveaway channel" changes it. The home server
+  uses `GIVEAWAY_CHANNEL_ID`. The bot needs Embed Links, Attach Files and (for the winner ping) Mention @everyone.
+- Tests: `npm run test:giveaway`.
+
+## Radar and Personal Vexo channels (upgrade phase 2)
+
+Only the channels exist so far; the features that post in them come in later phases (see `docs/VEXO_UPGRADE_PROGRESS.md`).
+
+- **Other servers**: the automatic setup (and `/setup`) creates `📡・nft-radar` and `📈・sol-radar` in the Vexo
+  category, read-only for members. A channel with that name (or the plain name `nft-radar` / `sol-radar`) anywhere
+  in the server is reused, never duplicated. IDs are saved per server; `/setup` can pick another channel.
+- **Personal Vexo** is a per-server switch, off by default: `/admin personalvexo guild_id:<id> on:true` (owner only).
+  Where it is on, `/setup` also creates `🤖・get-vexo-assistant`.
+- **Home server**: nothing is created. Set `NFT_RADAR_CHANNEL_ID`, `SOL_RADAR_CHANNEL_ID` and
+  `VEXO_ASSISTANT_CHANNEL_ID` (empty = off there).
+- No database change. Tests: `npm run test:setup`.
+
+## SOL Radar (upgrade phase 4)
+
+Database: after `migration_giveaway.sql`, run `supabase/migration_radar.sql` (re-runnable, one new table).
+
+- **What it does** (`src/solRadar.js`, data in `src/web3/market.js`): 4 or 5 short SOL market updates a day in each
+  server's SOL Radar channel: price, 24h high / low / change, RSI, volume, momentum, support / resistance and a
+  two-sentence outlook, always with the "not financial advice" line.
+- **Numbers** come from Binance's free public market data API (`https://data-api.binance.vision`, SOL/USDT, no
+  key: the price from `/ticker/price`, 24h high / low / change from `/ticker/24hr`, hourly history from `/klines`)
+  and are calculated in code. CoinGecko is the backup when Binance does not answer, and supplies the market-wide
+  volume line when it answers (`COINGECKO_API_KEY` is optional). The post's last line says where the data is from.
+  Both down = no post. The AI only writes the two outlook sentences, and every number
+  in them is checked against the real levels (otherwise pre-written sentences are used).
+- **Existing servers** get the radar channels once at the next bot start (`setup.upgradeExisting`), never the
+  home server.
+- **Cost**: market data is cached (5 and 15 minutes) and shared by all servers; at most one small AI call per
+  15 minutes for all servers together.
+- **Schedule**: default `SOL_RADAR_TIMES` on the `SOL_RADAR_TIMEZONE` clock (UTC). Per server: `/solradar times`.
+  After downtime only the newest time is posted, and only within 2 hours of it. The `sol_radar_posts` table
+  makes sure a time is never posted twice, also across restarts.
+- **Commands** (Manage Server or the boss): `/solradar status | on | off | times | now | preview`.
+- **Plan**: `solRadar` is premium. Not included yet: a news line (needs the web research module of NFT Radar).
+- Tests: `npm run test:solradar`.
+
+### NFT Radar (upgrade phase 3)
+
+- **What it does** (`src/nftRadar.js`, web research in `src/web3/research.js`): finds upcoming Solana NFT mints,
+  researches each one, and sends an approval request with **Approve / Reject** buttons to each premium server's
+  logs channel. Nothing is ever posted publicly until an admin (Manage Server / Administrator / the server's boss)
+  presses Approve. Then the post goes to that server's NFT Radar channel (HΛVØCZ: `NFT_RADAR_CHANNEL_ID`).
+- **Where projects come from** (all free): `/nftradar add <link or name>` by an admin (that server only, the most
+  reliable source); web search with Tavily at `NFT_RADAR_TIMES` (UTC); Magic Eden's public launchpad list (no key).
+  There is no complete free list of upcoming Solana mints, so expect few candidates from the web.
+- **Facts are never invented**: supply, price and date are kept only when they are written in the sources (checked
+  in code), otherwise "Not announced". Links must appear in the sources and pass the scam link checker. Dropped:
+  not a Solana NFT, mint over, no official link, suspicious, score below 6/10.
+- **Cost**: needs `TAVILY_API_KEY` (free: 1,000 searches a month). At most 5 new projects researched a day, at most
+  30 searches a day, about 3 searches per run; each project is researched once for all servers. At most 3 approval
+  requests per server per day. No key = NFT Radar is off (one log line), everything else works.
+- **No repeats**: tables `nft_radar_projects`, `nft_radar_reviews`, `nft_radar_runs` (in `supabase/migration_radar.sql`).
+- **Commands** (Manage Server or the boss, registered in every server): `/nftradar status | pending | preview | run |
+  add | on | off` (`run` at most once per 6 hours for all servers together; the bot owner can run it any time).
+- **Plan**: `nftRadar` is premium. Not included: artwork (image) judging.
+- Tests: `npm run test:nftradar`.

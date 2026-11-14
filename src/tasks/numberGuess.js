@@ -21,7 +21,9 @@ const config = require('../config');
 const personality = require('../personality');
 const identity = require('../identity');
 const store = require('./store');
-const { report } = require('./report');
+const { reportTo } = require('./report');
+const guilds = require('../guilds');
+const plans = require('../plans');
 const { ts, when } = require('./time');
 const { getTextChannel } = require('../utils');
 // shared with Rumble Royale: the prize classifier and the safe, idempotent, verified points payout
@@ -182,12 +184,12 @@ async function tick(task, { client }) {
     state.reminded = runAt - now <= REMIND_BEFORE_MS + MIN || config.game.announceMinutes <= 2;
     if (!(await store.update(task.id, { status: 'announced', state }, ['pending']))) return;
     status = 'announced';
-    const role = config.verifiedRoleId;
+    const role = guilds.settings(task.guild_id).pingRoleId; // HΛVØCZ: the verified role, other servers: the role picked in /setup
     const left = Math.max(1, Math.round((runAt - now) / MIN));
     const at = ts(runAt, 't');
     await send(client, task.channel_id, vary(ANNOUNCE)(role ? `<@&${role}> ` : '', left, prizeText(task.params?.prize), at), {
       roles: role ? [role] : [], // only the verified role is pinged. never @everyone / @here
-    }).catch((err) => report(client, `⚠️ Boss, I couldn't post the announcement for game #${task.id}: ${err.message}`));
+    }).catch((err) => reportTo(task.guild_id, client, `⚠️ Boss, I couldn't post the announcement for game #${task.id}: ${err.message}`));
   }
 
   if (status === 'announced' && !state.reminded && now >= runAt - REMIND_BEFORE_MS && now < runAt) {
@@ -205,16 +207,17 @@ async function startGame(task, client) {
 
   if (games.has(task.channel_id)) {
     await store.update(task.id, { status: 'cancelled', state: { ...task.state, endReason: 'channel_busy' } }, ['announced']);
-    return report(client, `⚠️ Boss, game #${task.id} was cancelled: another game is already running in <#${task.channel_id}>.`);
+    return reportTo(task.guild_id, client, `⚠️ Boss, game #${task.id} was cancelled: another game is already running in <#${task.channel_id}>.`);
   }
   if (!(await getTextChannel(client, task.channel_id))) {
     await store.update(task.id, { status: 'cancelled', state: { ...task.state, endReason: 'no_channel' } }, ['announced']);
-    return report(client, `⚠️ Boss, game #${task.id} was cancelled: I can't find or post in <#${task.channel_id}>.`);
+    return reportTo(task.guild_id, client, `⚠️ Boss, game #${task.id} was cancelled: I can't find or post in <#${task.channel_id}>.`);
   }
 
   const now = Date.now();
   const game = {
     taskId: task.id,
+    guildId: guilds.gid(task.guild_id),
     channelId: task.channel_id,
     min: lo,
     max: hi,
@@ -271,13 +274,17 @@ async function endGame(game, client, reason) {
   let pay = null;
   if (isPoints) {
     game.state = { ...game.state, secret: game.secret, winner: { id: w.id, tag: w.tag, guesses: w.guesses } };
-    pay = await payout({ taskId: game.taskId, game: type, state: game.state, winnerId: w.id, amount: prizeParams.prize_points });
+    pay = await payout({ taskId: game.taskId, game: type, state: game.state, winnerId: w.id, amount: prizeParams.prize_points, guildId: game.guildId });
   }
   try {
     if (reason === 'winner') {
-      const claim = config.channels.ticket
-        ? ` Open a ticket in <#${config.channels.ticket}> to claim your prize!`
-        : ' Open a ticket to claim your prize!';
+      // other servers: their own claim instructions. HΛVØCZ (ticketInstructions = null): its wording as always
+      const gs = guilds.settings(game.guildId);
+      const claim = gs.ticketInstructions
+        ? ` ${gs.ticketInstructions}`
+        : gs.channels.ticket
+          ? ` Open a ticket in <#${gs.channels.ticket}> to claim your prize!`
+          : ' Open a ticket to claim your prize!';
       // points sent = say so; payout failed or ticket prize = open a ticket; no prize = just celebrate
       const tail = isPoints && pay.ok ? ` **${prizeParams.prize_points} points** have been sent to your balance! 💰` : prizeParams.prize_type === 'none' ? '' : claim;
       await send(client, game.channelId, vary(WIN)(`<@${w.id}>`, game.secret, prizeText(game.prize)) + tail, { users: [w.id] });
@@ -317,11 +324,11 @@ async function endGame(game, client, reason) {
     } else {
       prizeLine = prize;
     }
-    await report(client, `🏆 Boss, game #${game.taskId} is done!\nWinner: **${w.tag}** (<@${w.id}>, ID \`${w.id}\`), won on their guess #${w.guesses}\n${stats}\n${prizeLine}`);
+    await reportTo(game.guildId, client, `🏆 Boss, game #${game.taskId} is done!\nWinner: **${w.tag}** (<@${w.id}>, ID \`${w.id}\`), won on their guess #${w.guesses}\n${stats}\n${prizeLine}`);
   } else if (reason === 'timeout') {
-    await report(client, `⏱️ Boss, game #${game.taskId} ended with **no winner**.\n${stats}\n${prize} (not given out).`);
+    await reportTo(game.guildId, client, `⏱️ Boss, game #${game.taskId} ended with **no winner**.\n${stats}\n${prize} (not given out).`);
   } else {
-    await report(client, `🛑 Game #${game.taskId} cancelled while running.\n${stats}`);
+    await reportTo(game.guildId, client, `🛑 Game #${game.taskId} cancelled while running.\n${stats}`);
   }
 }
 
@@ -332,7 +339,7 @@ async function endAfterRestart(task, client) {
   if (state.secret !== undefined) {
     await send(client, task.channel_id, vary(RESTARTED)(state.secret)).catch((err) => console.error('game restart message:', err.message));
   }
-  await report(client, `⚠️ Boss, I restarted while game #${task.id} was running, so I ended it safely with no winner. Order a new one if you want a rematch.`);
+  await reportTo(task.guild_id, client, `⚠️ Boss, I restarted while game #${task.id} was running, so I ended it safely with no winner. Order a new one if you want a rematch.`);
 }
 
 async function markMissed(task, client) {
@@ -341,7 +348,8 @@ async function markMissed(task, client) {
   if (task.status === 'announced') {
     await send(client, task.channel_id, vary(POSTPONED)).catch((err) => console.error('game postponed message:', err.message));
   }
-  await report(
+  await reportTo(
+    task.guild_id,
     client,
     `⚠️ Boss, I was offline at ${ts(task.run_at, 't')}, so I skipped game #${task.id} instead of starting it late. Give me a new time (or say "run a game now") if you still want it.`
   );
@@ -452,7 +460,7 @@ function guessReaction(game, uid, { repeated = false } = {}, rand = Math.random)
   if (!repeated && rand() >= REACT_CHANCE) return null; // a repeated number always gets a friendly nudge
   game.lastReactedTo = uid;
   // the boss is never asked anything, not even "Same number again?"
-  if (repeated && identity.isBoss(uid)) return deal(game, REPEAT_BOSS);
+  if (repeated && identity.isBoss(uid, game.guildId)) return deal(game, REPEAT_BOSS);
   return deal(game, repeated ? REPEAT : REACTIONS);
 }
 
@@ -479,7 +487,9 @@ async function maybeBanter(message, game) {
     max: game.max,
     guesses: game.totalGuesses,
     players: game.guesses.size,
-    isBoss: identity.isBoss(message.author), // the boss is "boss" in the game channel too
+    isBoss: identity.isBoss(message.author, game.guildId), // the boss is "boss" in the game channel too
+    useAi: plans.hasFeature(game.guildId, 'aiChat'), // AI banter is premium; otherwise pre-written lines (zero AI calls)
+    guildId: game.guildId,
   });
   await reply(message, line);
 }
