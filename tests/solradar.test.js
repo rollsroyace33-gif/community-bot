@@ -397,7 +397,7 @@ const inChannel = (ch) => sent.filter((m) => m.ch === ch && m.content.includes('
     await solRadar.tick(client, Date.now());
     assert.equal(sent.length, 0);
   });
-  await test('HΛVØCZ posts in SOL_RADAR_CHANNEL_ID; with that variable empty it posts nowhere', async () => {
+  await test('HΛVØCZ posts in SOL_RADAR_CHANNEL_ID; with no channel it posts nowhere and tells the logs channel ONCE', async () => {
     await park();
     const now = Date.now();
     await setTimes(HOME, timesWithSlot(now, 3));
@@ -410,11 +410,18 @@ const inChannel = (ch) => sent.filter((m) => m.ch === ch && m.content.includes('
     config.channels.solRadar = '';
     try {
       await solRadar.tick(client, Date.now());
+      await solRadar.tick(client, Date.now() + 60000); // later ticks (and restarts) do not repeat the note
       assert.match(solRadar.blocker(HOME), /SOL_RADAR_CHANNEL_ID/);
     } finally {
       config.channels.solRadar = keep;
     }
-    assert.equal(sent.length, 0);
+    assert.equal(sent.filter((m) => m.content.includes('SOL RADAR')).length, 0, 'no SOL Radar post anywhere');
+    assert.equal(sent.length, 1, 'exactly one note');
+    assert.equal(sent[0].ch, 'home-logs');
+    assert.match(sent[0].content, /SOL Radar\*\* has no channel/);
+    // the channel is back: the note is forgotten (no new note while it is set)
+    await solRadar.tick(client, Date.now() + 120000);
+    assert.equal(guilds.get(HOME).settings.channelNotices.solRadar, undefined);
   });
 
   say('== 5. When something is missing or broken ==');
