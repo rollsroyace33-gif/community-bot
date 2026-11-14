@@ -136,7 +136,7 @@ function resolveChannel(message, name) {
   if (mentioned) return mentioned.id;
   const wanted = String(name).replace(/^<#(\d+)>$/, '$1').replace(/^#/, '').trim().toLowerCase();
   if (/^\d{15,}$/.test(wanted)) return wanted;
-  if (wanted === 'general') return cfg().channels.general;
+  if (wanted === 'general') return guilds.getFeatureChannel(cfg(), 'general');
   const found = message.guild.channels.cache.find((c) => c.name.toLowerCase() === wanted && c.isTextBased());
   return found ? found.id : undefined;
 }
@@ -217,7 +217,7 @@ function proposePlan(message, handler, plan, lead) {
 async function scheduleOrder(message, ai, active) {
   const handler = registry.get(ai.task_type) || registry.get('number_guess');
   if (handler.planOrder) return plannedOrder(message, ai, handler);
-  const general = cfg().channels.general; // HΛVØCZ: GENERAL_CHANNEL_ID, other servers: their games channel
+  const general = guilds.getFeatureChannel(cfg(), 'general'); // /setup, else HΛVØCZ: GENERAL_CHANNEL_ID; other servers: their games channel
   if (!general) {
     return say(
       message,

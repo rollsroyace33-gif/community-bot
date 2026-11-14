@@ -58,7 +58,8 @@ function homeEnvChannels() {
     ...config.channels, // ask, general, marketplace, redeemLogs, receipts, ticketCategory, welcome, rules, control, ticket, giveaway, nftRadar, solRadar, assistant
     rumble: config.rumble.channelId,
     xDrop: config.xDrop.channelId,
-    logs: '', // no .env variable: feature logs use REDEEM_LOGS_CHANNEL_ID unless /setup picks a logs channel
+    // no own .env variable: REDEEM_LOGS_CHANNEL_ID is the .env fallback, but NEVER when it is the shop channel
+    logs: config.channels.redeemLogs && config.channels.redeemLogs !== config.channels.marketplace ? config.channels.redeemLogs : '',
   };
 }
 // the HΛVØCZ channels chosen in /setup ({ channels key: id }); empty values = not chosen
@@ -154,14 +155,26 @@ function settings(x) {
   return id === homeId() ? homeSettings() : otherSettings(id);
 }
 
-// THE channel for feature logs (SOL Radar, NFT Radar, giveaways, auto mod, scam alerts, settings changes):
-// the logs channel, else REDEEM_LOGS_CHANNEL_ID (HΛVØCZ), else the control channel. Never the marketplace
-// (shop) channel, even if a setting points there. Purchase logs keep their own channel (redeemLogs).
-function logsChannelId(x) {
+// ---------------------------------------------------------------- THE channel of a feature
+// Every feature gets its channel here (or from settings(x).channels, which is built by the same rules):
+//   1. the channel chosen in /setup for THIS server (guilds table)
+//   2. HΛVØCZ only: the .env variable as fallback
+//   3. otherwise '' = not set: the feature skips posting. There is NO fallback to another channel, and a
+//      feature that is not the shop never gets the shop (marketplace) channel, even if a setting points there.
+// feature names: control, logs, marketplace (or shop), rumble, games (or numberGuess, general), xDrop, giveaway,
+// nftRadar, solRadar, welcome, ask, assistant, receipts, ticket, ticketCategory, rules, redeemLogs (purchase log)
+const FEATURE_ALIASES = { shop: 'marketplace', games: 'general', numberGuess: 'general' };
+function getFeatureChannel(x, feature) {
   const s = x && typeof x === 'object' && 'isHome' in x && x.channels ? x : settings(x); // a settings object or anything settings() takes
-  const c = s.channels;
-  return [c.logs, c.redeemLogs, c.control].find((id) => id && id !== c.marketplace) || '';
+  const key = FEATURE_ALIASES[feature] || feature;
+  const id = String(s.channels[key] || '');
+  if (!id) return '';
+  if (key !== 'marketplace' && key !== 'redeemLogs' && id === s.channels.marketplace) return ''; // never the shop (purchase logs may live there)
+  return id;
 }
+// feature logs and notices (SOL / NFT Radar, giveaways, auto mod, scam alerts, settings changes): ONLY the logs
+// channel. Not set = nothing is sent (no fallback to control, general or the shop).
+const logsChannelId = (x) => getFeatureChannel(x, 'logs');
 
 // ---------------------------------------------------------------- rows
 const get = (x) => rows.get(gid(x)) || null;
@@ -244,6 +257,7 @@ module.exports = {
   isHome,
   settings,
   logsChannelId,
+  getFeatureChannel,
   homeChannelSources,
   HOME_CHANNEL_KEYS,
   get,

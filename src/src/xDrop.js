@@ -26,7 +26,7 @@ function statusIdOf(content) {
 
 // The X channel of a server. HΛVØCZ: X_DROP_CHANNEL_ID (.env). Other servers: the channel saved by the
 // automatic setup ("x-posts") or chosen in /setup. guild left out = HΛVØCZ.
-const channelOf = (guild) => guilds.settings(guild).channels.xDrop || '';
+const channelOf = (guild) => guilds.getFeatureChannel(guild, 'xDrop'); // /setup, else .env (HΛVØCZ); never the shop
 const isXChannel = (channelId, guild) => !!channelOf(guild) && channelId === channelOf(guild);
 
 // confirmation lines: each one states the credit, max one emoji, never a limit

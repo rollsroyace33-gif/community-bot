@@ -74,7 +74,7 @@ const nm = (p) => `**${safeName(p.name)}**`;
 // The Rumble channel of a server (HΛVØCZ: RUMBLE_CHANNEL_ID, other servers: the one from auto setup / /setup),
 // or '' when empty / not a Discord ID. Never falls back to another channel.
 function rumbleChannelId(guildId) {
-  const id = String(guilds.settings(guildId).channels.rumble || '');
+  const id = guilds.getFeatureChannel(guildId, 'rumble'); // /setup, else .env (HΛVØCZ); never the shop
   return /^\d{17,20}$/.test(id) ? id : '';
 }
 const MISSING_CHANNEL =

@@ -15,7 +15,7 @@ let bulkQueue = []; // userIds waiting for the combined welcome
 let bulkTimer = null;
 
 // the HΛVØCZ welcome channel: chosen in /setup, else WELCOME_CHANNEL_ID
-const welcomeChannelId = () => guilds.settings(guilds.homeId()).channels.welcome || '';
+const welcomeChannelId = () => guilds.getFeatureChannel(guilds.homeId(), 'welcome');
 
 // Post in the welcome channel, pinging only the given users. Never DMs anyone.
 async function post(client, content, userIds) {

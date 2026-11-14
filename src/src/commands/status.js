@@ -42,23 +42,23 @@ module.exports = {
     const c = s.channels;
     // HΛVØCZ: where each channel comes from (/setup wins over .env)
     const src = s.isHome ? guilds.homeChannelSources() : {};
-    const from = (key) => (!s.isHome ? '' : src[key]?.from === 'setup' ? ' · from /setup' : src[key]?.from === 'env' ? ' · from .env' : '');
+    // each feature's channel exactly as the feature itself gets it (not set = that feature posts nothing)
+    const f = (key) => guilds.getFeatureChannel(s, key);
+    const from = (key) => (!s.isHome || !f(key) ? '' : src[key]?.from === 'setup' ? ' · from /setup' : src[key]?.from === 'env' ? ` · from .env${key === 'logs' ? ' (REDEEM_LOGS_CHANNEL_ID)' : ''}` : '');
     const solRadar = require('../solRadar');
     const solRadarNote = solRadar.blocker(s.guildId) ? 'not posting, see /solradar status' : `${solRadar.settingsOf(s.guildId).times.length} updates a day`;
-    const logsId = guilds.logsChannelId(s);
-    const logsFrom = !s.isHome ? '' : src.logs?.from === 'setup' ? ' · from /setup' : logsId && logsId === c.redeemLogs ? ' · purchase log channel, from .env' : logsId ? ' · control channel (no logs channel set)' : '';
     const channels = [
-      `Control: ${ch(c.control)}${from('control')}`,
-      `Marketplace: ${ch(c.marketplace)}${from('marketplace')}`,
-      `Rumble: ${ch(c.rumble)}${from('rumble')}`,
-      `Number guess: ${ch(c.general)}${from('general')}`,
-      `X posts: ${ch(c.xDrop)}${c.xDrop ? ` (${config.xDrop.points} points per X post link)` : ''}${from('xDrop')}`,
-      `Giveaways: ${ch(c.giveaway)}${from('giveaway')}`,
-      `NFT Radar: ${ch(c.nftRadar)}${c.nftRadar ? ` (${require('../nftRadar').blocker(s.guildId) ? 'not running, see /nftradar status' : 'on, posts after approval'})` : ''}${from('nftRadar')}`,
-      `SOL Radar: ${ch(c.solRadar)}${c.solRadar ? ` (${solRadarNote})` : ''}${from('solRadar')}`,
-      ...(s.isHome ? [`Welcome: ${ch(c.welcome)}${from('welcome')}`, `Ask (Q&A): ${ch(c.ask)}${from('ask')}`] : []),
-      ...(s.personalVexo && !s.isHome ? [`Get Vexo Assistant: ${ch(c.assistant)}`] : []),
-      `Logs: ${ch(logsId)}${logsFrom}`,
+      `Control: ${ch(f('control'))}${from('control')}`,
+      `Marketplace: ${ch(f('marketplace'))}${from('marketplace')}`,
+      `Rumble: ${ch(f('rumble'))}${from('rumble')}`,
+      `Number guess: ${ch(f('general'))}${from('general')}`,
+      `X posts: ${ch(f('xDrop'))}${f('xDrop') ? ` (${config.xDrop.points} points per X post link)` : ''}${from('xDrop')}`,
+      `Giveaways: ${ch(f('giveaway'))}${from('giveaway')}`,
+      `NFT Radar: ${ch(f('nftRadar'))}${f('nftRadar') ? ` (${require('../nftRadar').blocker(s.guildId) ? 'not running, see /nftradar status' : 'on, posts after approval'})` : ''}${from('nftRadar')}`,
+      `SOL Radar: ${ch(f('solRadar'))}${f('solRadar') ? ` (${solRadarNote})` : ''}${from('solRadar')}`,
+      ...(s.isHome ? [`Welcome: ${ch(f('welcome'))}${from('welcome')}`, `Ask (Q&A): ${ch(f('ask'))}${from('ask')}`] : []),
+      ...(s.personalVexo && !s.isHome ? [`Get Vexo Assistant: ${ch(f('assistant'))}`] : []),
+      `Logs: ${ch(f('logs'))}${from('logs')}`,
       `Game ping role: ${s.pingRoleId ? `<@&${s.pingRoleId}>` : 'none'}`,
       `Boss: ${s.bossUserId ? `<@${s.bossUserId}>` : 'not set'}`,
       `Knowledge sources: ${s.knowledgeSources.length ? `${s.knowledgeSources.map(ch).join(', ')}${s.isHome ? ' (separate sheet, knowledge.md unchanged)' : ''}` : s.isHome ? 'knowledge.md + control channel' : 'none chosen (run /setup)'}`,

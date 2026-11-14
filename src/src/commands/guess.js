@@ -48,7 +48,7 @@ module.exports = {
     }
 
     // start
-    const channelId = s.channels.general;
+    const channelId = guilds.getFeatureChannel(s, 'general'); // /setup, else .env (HΛVØCZ); never the shop
     if (!channelId) return interaction.editReply(s.isHome ? 'No number guess channel is set: choose one in /setup (or set GENERAL_CHANNEL_ID), so I have somewhere to host the game.' : 'No games channel is set for this server. Run /setup first.');
     const lo = interaction.options.getInteger('min');
     const hi = interaction.options.getInteger('max');

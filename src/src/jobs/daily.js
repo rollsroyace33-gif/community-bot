@@ -113,7 +113,7 @@ async function runDailyJob(client, { force = false, guildId: rawGuildId } = {}) 
       await points.adjustPoints(top.user_id, P.topBonus, 'daily top 1', guildId);
       await supabase.from('daily_stats').update({ bonus_pts: P.topBonus }).eq('guild_id', guildId).eq('user_id', top.user_id).eq('day', day);
 
-      const ch = await getTextChannel(client, guilds.settings(guildId).channels.general);
+      const ch = await getTextChannel(client, guilds.getFeatureChannel(guildId, 'general')); // not set = no announcement
       if (ch) {
         const msg = TEMPLATES[Math.floor(Math.random() * TEMPLATES.length)](top.user_id, P.topBonus);
         await ch.send({ content: msg, allowedMentions: { users: [top.user_id] } }).catch((e) => console.error(e.message));

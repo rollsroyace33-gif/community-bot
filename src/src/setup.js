@@ -240,13 +240,10 @@ async function upgradeExisting(client) {
 
 // ---------------------------------------------------------------- HΛVØCZ: "Create missing channels" (button only)
 // Never called automatically (not on startup, not on join): only when an admin presses the button in /setup.
-const HOME_CREATE_KEYS = ['control', 'logs', 'marketplace', 'rumble', 'xDrop', 'giveaway', 'nftRadar', 'solRadar'];
-// the channel a key uses in HΛVØCZ now (logs: the logs channel, else REDEEM_LOGS_CHANNEL_ID unless that is the shop)
-function homeCurrent(key) {
-  const c = guilds.settings(guilds.homeId()).channels;
-  if (key === 'logs') return c.logs || (c.redeemLogs && c.redeemLogs !== c.marketplace ? c.redeemLogs : '');
-  return c[key] || '';
-}
+// the three channels the button may create in HΛVØCZ (same names and category as in customer servers)
+const HOME_CREATE_KEYS = ['solRadar', 'nftRadar', 'giveaway'];
+// the channel a key uses in HΛVØCZ now (/setup, else .env)
+const homeCurrent = (key) => guilds.getFeatureChannel(guilds.homeId(), key);
 // keys whose channel is not set (neither /setup nor .env) or no longer exists. Fills the channel cache first.
 async function missingHome(guild) {
   if (!guilds.isHome(guild.id)) return [];
@@ -256,9 +253,10 @@ async function missingHome(guild) {
     return !id || !guild.channels.cache.has(String(id));
   });
 }
-// create (or reuse by name) the missing ones and save them as /setup choices -> { created, reused, error, missing }
+// create (or reuse by name) the missing ones and save them as /setup choices -> { created, reused, ids, error, missing }
+// Existing channels are never changed (a reused channel keeps its name, topic and permissions).
 async function createMissingHome(guild) {
-  const out = { created: [], reused: [], error: null, missing: [] };
+  const out = { created: [], reused: [], ids: {}, error: null, missing: [] };
   if (!guilds.isHome(guild.id)) return { ...out, error: 'not the home server' };
   try {
     const bot = await me(guild);
@@ -292,10 +290,8 @@ async function createMissingHome(guild) {
         out.created.push(key);
       }
       // saved right away as a /setup choice: a later failure never makes this one twice
+      out.ids[key] = id;
       await guilds.patchSettings(guild.id, { ...(categoryId ? { categoryId } : {}), channels: { [key]: id } });
-    }
-    if (out.created.includes('marketplace') || out.reused.includes('marketplace')) {
-      await require('./marketplace').ensureHeader(guild.client, guild.id).catch((err) => console.error('home setup shop header:', err.message));
     }
   } catch (err) {
     console.error(`home setup in guild ${guild.id}:`, err.message);

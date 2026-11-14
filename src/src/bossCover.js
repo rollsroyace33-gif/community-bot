@@ -61,8 +61,8 @@ const allowNone = { repliedUser: false, parse: [] };
 function isTicketChannel(message) {
   const ch = message.channel;
   return (
-    (config.channels.ticket && message.channelId === config.channels.ticket) ||
-    (config.channels.ticketCategory && ch?.parentId === config.channels.ticketCategory) ||
+    (guilds.getFeatureChannel(message, 'ticket') && message.channelId === guilds.getFeatureChannel(message, 'ticket')) ||
+    (guilds.getFeatureChannel(message, 'ticketCategory') && ch?.parentId === guilds.getFeatureChannel(message, 'ticketCategory')) ||
     /^ticket-/i.test(ch?.name || '')
   );
 }
@@ -209,7 +209,7 @@ async function handle(message) {
     if (!guilds.settings(message).bossHours) return false;
     if (!bossId() || message.author.bot || message.author.id === bossId()) return false;
     if (!mentionsBoss(message)) return false;
-    if (message.channelId === guilds.settings(message).channels.control || isTicketChannel(message)) return false; // control: /setup first, then .env
+    if (message.channelId === guilds.getFeatureChannel(message, 'control') || isTicketChannel(message)) return false; // control: /setup first, then .env
     if (!isBossOffline(clock.now())) return false; // outside the window: mentions behave as before
     if (presence.recentlyActive(config.bossActiveRecentMinutes, guilds.gid(message))) return false; // the boss is around
 

@@ -78,12 +78,12 @@ function homeSummary(missing) {
   const keys = Object.keys(HOME_CHANNEL_LABELS);
   const rows = [];
   for (let i = 0; i < keys.length; i += 3) rows.push(keys.slice(i, i + 3).map(line).join(' · '));
-  if (!src.logs.id && s.channels.redeemLogs) rows.push(`(Feature logs use the purchase log channel <#${s.channels.redeemLogs}> (.env) until you choose a logs channel.)`);
+  if (!src.logs.id && s.channels.redeemLogs) rows.push(`(REDEEM_LOGS_CHANNEL_ID is the shop channel, so it is not used for logs. Choose a logs channel: until then feature logs are not sent.)`);
   const saved = guilds.get(guilds.homeId())?.settings || {};
   const roleFrom = typeof saved.pingRoleId === 'string' ? '(/setup)' : s.pingRoleId ? '(.env)' : '';
   rows.push(`Game ping role: ${s.pingRoleId ? `<@&${s.pingRoleId}> ${roleFrom}` : '*none*'} · Boss: ${s.bossUserId ? `<@${s.bossUserId}>` : '*not set*'} (BOSS_USER_ID, not changed here)`);
   rows.push(`Knowledge sources: ${s.knowledgeSources.length ? s.knowledgeSources.map((id) => `<#${id}>`).join(', ') : '*none chosen* (Vexo uses knowledge.md + what the boss teaches)'}`);
-  rows.push(missing.length ? `Missing channels: ${missing.map((k) => `**${SHORT[k]}**`).join(', ')} (press **Create missing channels** to make them)` : 'No channel is missing.');
+  rows.push(missing.length ? `Missing channels: ${missing.map((k) => `**${SHORT[k]}**`).join(', ')} (press **Create missing channels** to make them)` : 'SOL Radar, NFT Radar and Giveaways all have a channel.');
   return rows.join('\n');
 }
 
@@ -162,7 +162,7 @@ async function handleComponent(interaction) {
     if (res.error === 'missing_permissions') note = setup.permissionHelp(res.missing);
     else if (res.error) note = `⚠️ I could not create the channels: ${res.error}.`;
     else if (!res.created.length && !res.reused.length) note = '✅ Nothing was missing.';
-    else note = [res.created.length && `✅ Created: ${res.created.map((k) => `**${setup.KEYS[k].name}**`).join(', ')}.`, res.reused.length && `♻️ Found and now using: ${res.reused.map((k) => `**${setup.KEYS[k].name}**`).join(', ')} (already existed, not duplicated).`].filter(Boolean).join('\n');
+    else note = [res.created.length && `✅ Created: ${res.created.map((k) => `${SHORT[k]} <#${res.ids[k]}>`).join(', ')}.`, res.reused.length && `♻️ Found and now using: ${res.reused.map((k) => `${SHORT[k]} <#${res.ids[k]}>`).join(', ')} (already existed, not duplicated or changed).`].filter(Boolean).join('\n');
     return interaction.editReply(await panel(interaction.guild, note));
   }
 
@@ -200,9 +200,12 @@ async function handleComponent(interaction) {
       await guilds.patchSettings(guildId, { channels: { [key]: '' } });
       return show(`✅ ${labelOf(guildId, key)}: back to the .env value.`);
     }
-    // feature logs never go to the shop: the logs and marketplace channels must be different
+    // only shop content goes to the shop: no other feature may use the marketplace channel
     const c = guilds.settings(guildId).channels;
-    if ((key === 'logs' && id === c.marketplace) || (key === 'marketplace' && id === c.logs)) {
+    if (key !== 'marketplace' && id === c.marketplace) {
+      return show(`⚠️ <#${id}> is the marketplace (shop) channel. Only shop content goes there, so it cannot also be the ${labelOf(guildId, key)}. Choose a different channel.`);
+    }
+    if (key === 'marketplace' && id === c.logs) {
       return show('⚠️ The logs channel and the marketplace (shop) channel must be different channels. Logs never go to the shop.');
     }
     const channel = interaction.guild.channels.cache.get(id);

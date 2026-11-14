@@ -277,10 +277,11 @@ async function start(o) {
     if (!plans.hasFeature(guildId, 'points')) return { error: `A points prize needs the points system, which is a premium feature in this server. Use a text prize instead.${config.supportContact ? ` ${config.supportContact}` : ''}` };
   }
 
-  const channelId = String(o.channelId || s.channels.giveaway || '');
+  const channelId = String(o.channelId || guilds.getFeatureChannel(s, 'giveaway') || ''); // never the shop
   if (!channelId) {
     return { error: s.isHome ? 'No giveaway channel is set. Choose one in /setup (or set GIVEAWAY_CHANNEL_ID), or choose a channel in the command.' : 'No giveaway channel is set for this server. Run **/setup** (it creates one), or choose a channel in the command.' };
   }
+  if (channelId === guilds.getFeatureChannel(s, 'marketplace')) return { error: `<#${channelId}> is the marketplace (shop) channel: only shop content goes there. Choose another channel for the giveaway.` };
   const channel = await getTextChannel(o.client, channelId);
   if (!channel || String(channel.guildId || channel.guild?.id || guildId) !== guildId) return { error: `I cannot find the channel <#${channelId}> in this server.` };
 

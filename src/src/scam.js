@@ -416,8 +416,8 @@ async function record(guildId, userId, action, reason) {
 // ---------------------------------------------------------------- logging
 const code = (t, max) => `\`\`\`\n${String(t || '(no text)').replace(/```/g, "'''").slice(0, max)}\n\`\`\``;
 async function logChannel(client, s) {
-  // logs channel, else REDEEM_LOGS / control (never the shop); if that one is unreachable, the control channel
-  return (await getTextChannel(client, guilds.logsChannelId(s))) || (await getTextChannel(client, s.channels.control));
+  // ONLY the logs channel (never control, general or the shop); not set = the alert is not sent (console only)
+  return getTextChannel(client, guilds.logsChannelId(s));
 }
 function logEmbed({ title, color, user, action, channelId, res, reporter, text, problem }) {
   const embed = new EmbedBuilder()

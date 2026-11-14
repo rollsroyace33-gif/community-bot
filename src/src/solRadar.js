@@ -73,7 +73,7 @@ function blocker(guildId) {
   if (!market.available()) return 'the market data key (COINGECKO_API_KEY) is not set on the bot';
   if (!s.known) return 'this server is not set up';
   if (!plans.hasFeature(guildId, 'solRadar')) return 'SOL Radar is a premium feature and this server is on the free plan';
-  if (!s.channels.solRadar) return s.isHome ? 'no SOL Radar channel is set (choose one in /setup, or set SOL_RADAR_CHANNEL_ID)' : 'no SOL Radar channel is set (run /setup)';
+  if (!guilds.getFeatureChannel(s, 'solRadar')) return s.isHome ? 'no SOL Radar channel is set (choose one in /setup, or set SOL_RADAR_CHANNEL_ID)' : 'no SOL Radar channel is set (run /setup)';
   if (!settingsOf(guildId).enabled) return 'it is switched off (/solradar on)';
   return '';
 }
@@ -207,7 +207,7 @@ async function warn(client, guildId, text) {
 // send one update to this server's SOL Radar channel -> { ok } | { error }
 async function postTo(client, guildId, text) {
   const s = guilds.settings(guildId);
-  const channel = await getTextChannel(client, s.channels.solRadar);
+  const channel = await getTextChannel(client, guilds.getFeatureChannel(s, 'solRadar')); // not set = nothing is posted
   if (!channel) return { error: `I cannot find the SOL Radar channel${s.isHome ? ' (choose it in /setup, or check SOL_RADAR_CHANNEL_ID)' : ' (run /setup)'}.` };
   const me = channel.guild?.members?.me;
   const perms = me && channel.permissionsFor ? channel.permissionsFor(me) : null;
@@ -234,6 +234,12 @@ async function tick(client, nowMs = Date.now()) {
     const due = [];
     for (const row of guilds.all()) {
       const id = String(row.guild_id);
+      // switched on and allowed, but no channel: skip (never another channel) and tell the admins once
+      const s = guilds.settings(id);
+      if (s.known && plans.hasFeature(id, 'solRadar') && settingsOf(id).enabled) {
+        if (!guilds.getFeatureChannel(s, 'solRadar')) await require('./notices').missingChannelOnce(client, id, 'solRadar', 'SOL Radar');
+        else await require('./notices').channelBack(id, 'solRadar');
+      }
       if (blocker(id)) continue;
       const st = settingsOf(id);
       const { slot, ageMin } = newestSlot(st.times, st.timezone, nowMs);
@@ -251,7 +257,7 @@ async function tick(client, nowMs = Date.now()) {
     }
     for (const { id, slot } of due) {
       // claim the slot in the database first: only one process can, and only once
-      const { error } = await supabase.from('sol_radar_posts').insert({ guild_id: id, slot, channel_id: guilds.settings(id).channels.solRadar });
+      const { error } = await supabase.from('sol_radar_posts').insert({ guild_id: id, slot, channel_id: guilds.getFeatureChannel(id, 'solRadar') });
       if (error) {
         if (error.code === '23505') done.add(`${id}|${slot}`); // already posted (before a restart, or by another process)
         else if (!tableMissing) {

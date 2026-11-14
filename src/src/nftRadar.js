@@ -130,7 +130,7 @@ function blocker(guildId) {
   if (!research.available()) return 'the web research key (TAVILY_API_KEY) is not set on the bot';
   if (!s.known) return 'this server is not set up';
   if (!plans.hasFeature(guildId, 'nftRadar')) return 'NFT Radar is a premium feature and this server is on the free plan';
-  if (!s.channels.nftRadar) return s.isHome ? 'no NFT Radar channel is set (choose one in /setup, or set NFT_RADAR_CHANNEL_ID)' : 'no NFT Radar channel is set (run /setup)';
+  if (!guilds.getFeatureChannel(s, 'nftRadar')) return s.isHome ? 'no NFT Radar channel is set (choose one in /setup, or set NFT_RADAR_CHANNEL_ID)' : 'no NFT Radar channel is set (run /setup)';
   if (!logsChannelId(s)) return 'there is no logs channel for the approval requests (run /setup)';
   if (!settingsOf(guildId).enabled) return 'it is switched off (/nftradar on)';
   return '';
@@ -655,7 +655,7 @@ async function handleButton(interaction) {
 // the public post in this server's NFT Radar channel -> { ok, channelId, messageId } | { error }
 async function postTo(client, guildId, text) {
   const s = guilds.settings(guildId);
-  const channel = await getTextChannel(client, s.channels.nftRadar);
+  const channel = await getTextChannel(client, guilds.getFeatureChannel(s, 'nftRadar')); // not set = nothing is posted
   if (!channel) return { error: `I cannot find the NFT Radar channel${s.isHome ? ' (choose it in /setup, or check NFT_RADAR_CHANNEL_ID)' : ' (run /setup)'}.` };
   const me = channel.guild?.members?.me;
   const perms = me && channel.permissionsFor ? channel.permissionsFor(me) : null;
@@ -725,8 +725,21 @@ const runTimes = () => {
   return t.length ? t : ['09:00', '21:00'];
 };
 
+// switched on and allowed, but no NFT Radar channel: nothing is ever posted there; tell the admins once
+async function checkChannels(client) {
+  const notices = require('./notices');
+  for (const row of guilds.all()) {
+    const id = String(row.guild_id);
+    const s = guilds.settings(id);
+    if (!s.known || !plans.hasFeature(id, 'nftRadar') || !settingsOf(id).enabled) continue;
+    if (!guilds.getFeatureChannel(s, 'nftRadar')) await notices.missingChannelOnce(client, id, 'nftRadar', 'NFT Radar');
+    else await notices.channelBack(id, 'nftRadar');
+  }
+}
+
 async function tick(client, nowMs = Date.now()) {
   if (running || !research.available()) return;
+  await checkChannels(client).catch((e) => console.error('[nftRadar] channel check:', e.message));
   const { slot, ageMin } = require('./solRadar').newestSlot(runTimes(), 'UTC', nowMs);
   if (ageMin > GRACE_MIN || done.has(slot)) return;
   if (!targetGuilds().length) return; // nobody uses NFT Radar: no searches are spent
