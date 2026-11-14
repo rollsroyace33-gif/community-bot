@@ -1,2 +1,16 @@
 node_modules
+
+# secrets: every .env file in every folder (including supabase/.env). Never upload these.
 .env
+**/.env
+.env.*
+**/.env.*
+# ...but the example file (names only, no values) is safe and should be uploaded
+!.env.example
+
+# safety copies made before each upgrade phase (local only)
+backups
+backups/
+
+# upload helper: copies of changed files (upload its CONTENTS, never this folder itself)
+deploy-pack/

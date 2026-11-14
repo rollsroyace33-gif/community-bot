@@ -490,8 +490,10 @@ Database: after `migration_giveaway.sql`, run `supabase/migration_radar.sql` (re
 
 ### /setup in the home server (HΛVØCZ)
 
-- `/setup` works in HΛVØCZ too (the boss or Manage Server). Channel pickers: control, logs, marketplace, Rumble,
-  number guess, X posts, giveaways, NFT Radar, SOL Radar, welcome, ask; the game ping role; knowledge source channels.
+- `/setup` is the SAME in every server, HΛVØCZ included (the boss or Manage Server): control, logs, marketplace,
+  Rumble, number guess, X posts, giveaways, NFT Radar, SOL Radar, welcome, ask (+ Get Vexo Assistant where Personal
+  Vexo is on); the game ping role; knowledge source channels; boss; ticket text. Only differences in HΛVØCZ: the
+  .env fallback and the Create missing channels button (no automatic channels).
 - Priority: a channel chosen in `/setup` (saved in the HΛVØCZ guilds row) wins; everything not chosen keeps its
   `.env` value. "Choose none" in a picker goes back to the `.env` value. A deleted `/setup` channel falls back to `.env`.
 - **Create missing channels** button: creates (or reuses by name, never duplicates, never changes) only the
