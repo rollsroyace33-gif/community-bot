@@ -80,8 +80,50 @@ function rumbleChannelId(guildId) {
 const MISSING_CHANNEL =
   "⚠️ RUMBLE_CHANNEL_ID is missing (or not a valid channel ID) in .env, so I can't host a Rumble. " +
   'Paste the Rumble channel ID there and restart me. I never use another channel instead.';
-const MISSING_CHANNEL_OTHER = "⚠️ No Rumble channel is set for this server (or I can't see it), so I can't host a Rumble. Run /setup to create or choose one.";
+const MISSING_CHANNEL_OTHER = '⚠️ Rumble channel not set, run /setup.';
 const missingChannel = (guildId) => (guilds.isHome(guildId) ? MISSING_CHANNEL : MISSING_CHANNEL_OTHER);
+
+// The server a Discord channel belongs to ('' = unknown: not in the cache / a test fake)
+const guildOfChannel = (channel) => String(channel?.guildId || channel?.guild?.id || '');
+
+// The Rumble channel of THIS server only: '' when not set, or when Discord says that channel sits in another
+// server (e.g. a saved setting pointing at HΛVØCZ's channel). Never falls back to any other server's channel.
+function ownRumbleChannel(guildId, client) {
+  const id = rumbleChannelId(guildId);
+  if (!id) return '';
+  const other = guildOfChannel(client?.channels?.cache?.get?.(id));
+  if (other && other !== guilds.gid(guildId)) {
+    console.error(`[rumble guard] server ${guilds.gid(guildId)}: its Rumble channel ${id} belongs to server ${other}, refused (run /setup there)`);
+    return '';
+  }
+  return id;
+}
+
+// GUARD: every Rumble message, ping and prize checks that its channel is in the Rumble's own server (the task's
+// guild_id). A mismatch is not sent, is logged, and that server's boss is told ONCE per Rumble in its logs channel.
+const guardWarned = new Set(); // task ids already reported
+async function sameGuild(channel, guildId, taskId, client, what) {
+  const want = guilds.gid(guildId);
+  const got = guildOfChannel(channel);
+  if (!got || got === want) return true; // a Discord server channel always has a server id; only test fakes have none
+  console.error(`[rumble guard] Rumble #${taskId}: blocked ${what} to channel ${channel.id} (server ${got}), the Rumble belongs to server ${want}`);
+  if (guardWarned.has(taskId)) return false;
+  guardWarned.add(taskId);
+  try {
+    const s = guilds.settings(want);
+    const logs = await getTextChannel(client, guilds.logsChannelId(s));
+    if (logs && guildOfChannel(logs) === want) {
+      const boss = s.bossUserId ? `<@${s.bossUserId}> ` : '';
+      await logs.send({
+        content: `${boss}⚠️ Rumble #${taskId}: I blocked a ${what} because the Rumble channel <#${channel.id}> is not in this server. Nothing was sent and no points were paid. Run /setup and choose this server's Rumble channel.`,
+        allowedMentions: { parse: [], users: s.bossUserId ? [s.bossUserId] : [] },
+      });
+    }
+  } catch (err) {
+    console.error('[rumble guard] logs notice:', err.message);
+  }
+  return false;
+}
 
 // Shuffle bag: every line of a list is used once before any line comes back (per game).
 // Lines drawn outside a game (heads-up, denials) use a module-wide bag.
@@ -127,8 +169,8 @@ function parseMinPlayers(text) {
 // The ONE place params are built, for both entry points. { params } or { error }
 // remind_before_seconds: the boss's own "remind N min before" list (only stored when he gave one)
 // guildId: the server the Rumble is for (left out = HΛVØCZ)
-function buildRumbleParams({ join_minutes, prize, min_players, remind_before_seconds } = {}, guildId) {
-  const channelId = rumbleChannelId(guildId);
+function buildRumbleParams({ join_minutes, prize, min_players, remind_before_seconds } = {}, guildId, client) {
+  const channelId = ownRumbleChannel(guildId, client);
   if (!channelId) return { error: missingChannel(guildId) };
   const jm = join_minutes === null || join_minutes === undefined || join_minutes === '' ? R().defaultJoinMinutes : Number(join_minutes);
   if (!Number.isInteger(jm) || jm < 1 || jm > R().maxJoinMinutes) return { error: `The join window must be 1 minute to ${fmtDuration(R().maxJoinMinutes)}.` };
@@ -219,8 +261,9 @@ const clashText = (t) =>
   `There is already a game in <#${t.channel_id}> (#${t.id}, ${t.type}, ${t.status}). Only one game runs per channel, so cancel it first or wait for it to end.`;
 
 // The ONE place a Rumble task is created (both entry points). { row } or { error }
-async function createRumble({ params, runAt, createdBy, source, guildId }) {
-  if (!rumbleChannelId(guildId) || params.channel_id !== rumbleChannelId(guildId)) return { error: missingChannel(guildId) };
+async function createRumble({ params, runAt, createdBy, source, guildId, client }) {
+  const own = ownRumbleChannel(guildId, client);
+  if (!own || params.channel_id !== own) return { error: missingChannel(guildId) };
   const clash = (await findClash(params.channel_id)) || (games.has(params.channel_id) ? { channel_id: params.channel_id, id: '?', type, status: 'running' } : null);
   if (clash) return { error: clashText(clash) };
   const now = Date.now();
@@ -278,8 +321,10 @@ function aiLine(t, { bossLocal: local }) {
 //   { offer: { question, next } }                         past hosting time: "host it right now instead" / "tomorrow"
 //   { choice: { question, options: [{ at, next }] } }      two different game start times: the boss picks one
 const MAX_AHEAD_MS = 30 * 86400000;
-async function planOrder({ ai, text, createdBy, followUp = false, guildId }) {
-  if (!rumbleChannelId(guildId)) return { error: missingChannel(guildId) };
+// guildId: the server where the order was given (required); client: to check the channel really is in that server
+async function planOrder({ ai, text, createdBy, followUp = false, guildId, client }) {
+  if (!guildId) return { error: MISSING_CHANNEL_OTHER }; // never guess the server
+  if (!ownRumbleChannel(guildId, client)) return { error: missingChannel(guildId) };
   const read = orderTime.readOrder(text, { kind: 'rumble' });
   const now = Date.now();
   const aiPrize = typeof ai.prize === 'string' && ai.prize.trim() ? ai.prize.trim() : null;
@@ -319,7 +364,7 @@ async function planOrder({ ai, text, createdBy, followUp = false, guildId }) {
     min_players: read.minPlayers ?? parseMinPlayers(text) ?? ai.min_players ?? null,
     remind: read.remind?.secs ?? remindFromAi(ai.remind_before),
   };
-  const fromHost = (H) => planFromHost({ read, ai, H, details, createdBy, guildId });
+  const fromHost = (H) => planFromHost({ read, ai, H, details, createdBy, guildId, client });
 
   // hosting time already passed: offer "now" (up to 30 min late) or the same time tomorrow
   if (past?.recent) {
@@ -339,7 +384,7 @@ const remindFromAi = (list) => {
 };
 
 // The plan for one hosting instant H (ms). forced = the start the boss picked when two were given.
-async function planFromHost({ read, ai, H, details, createdBy, guildId, forced = null }) {
+async function planFromHost({ read, ai, H, details, createdBy, guildId, client, forced = null }) {
   // ---- every game start the boss gave, as instants: [{ at, fixed, phrase }]
   //   fixed = a clock time ("play at 8:30 pm"): stays put if he confirms late; otherwise relative to hosting
   let starts = [];
@@ -376,7 +421,7 @@ async function planFromHost({ read, ai, H, details, createdBy, guildId, forced =
     return {
       choice: {
         question: `Two different game start times in your order, boss:\n${lines.join('\n')}\nWhich one, ${names.slice(0, opts.length).join(' or ')}?`,
-        options: opts.map((o) => ({ at: o.at, next: () => planFromHost({ read, ai, H, details, createdBy, guildId, forced: o }) })),
+        options: opts.map((o) => ({ at: o.at, next: () => planFromHost({ read, ai, H, details, createdBy, guildId, client, forced: o }) })),
       },
     };
   }
@@ -388,7 +433,7 @@ async function planFromHost({ read, ai, H, details, createdBy, guildId, forced =
     return { error: `That join window is ${fmtDuration(windowMin)}, boss. The longest I can do is ${fmtDuration(R().maxJoinMinutes)} (RUMBLE_MAX_JOIN_MINUTES).` };
   }
 
-  const built = buildRumbleParams({ join_minutes: windowMin, prize: details.prize, min_players: details.min_players, remind_before_seconds: details.remind }, guildId);
+  const built = buildRumbleParams({ join_minutes: windowMin, prize: details.prize, min_players: details.min_players, remind_before_seconds: details.remind }, guildId, client);
   if (built.error) return { error: built.error };
   const { params } = built;
   const clash = await findClash(params.channel_id);
@@ -411,7 +456,7 @@ async function planFromHost({ read, ai, H, details, createdBy, guildId, forced =
       const host = Math.max(H, Date.now());
       const jm = start.fixed ? Math.round((start.at - host) / MIN) : windowMin;
       if (jm < 1) return { error: 'That start time has passed while we were talking, boss. Send the order again with a new time.' };
-      return createRumble({ params: { ...params, join_minutes: Math.min(jm, R().maxJoinMinutes) }, runAt: new Date(host), createdBy, source: 'vexo', guildId });
+      return createRumble({ params: { ...params, join_minutes: Math.min(jm, R().maxJoinMinutes) }, runAt: new Date(host), createdBy, source: 'vexo', guildId, client });
     },
   };
 }
@@ -440,6 +485,7 @@ function describe(task) {
 async function post(game, content, allowed = {}) {
   const channel = await getTextChannel(game.client, game.channelId);
   if (!channel) throw new Error(`channel ${game.channelId} not found`);
+  if (!(await sameGuild(channel, game.guildId, game.taskId, game.client, 'message'))) return null;
   return channel.send({ content, allowedMentions: { parse: [], ...allowed } });
 }
 const safePost = (game, content, allowed) => post(game, content, allowed).catch((err) => console.error(`rumble #${game.taskId} post:`, err.message));
@@ -448,6 +494,7 @@ const safePost = (game, content, allowed) => post(game, content, allowed).catch(
 async function postEmbed(game, embed) {
   const channel = await getTextChannel(game.client, game.channelId);
   if (!channel) return console.error(`rumble #${game.taskId}: channel ${game.channelId} not found`);
+  if (!(await sameGuild(channel, game.guildId, game.taskId, game.client, 'card'))) return;
   await channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch((err) => console.error(`rumble #${game.taskId} card:`, err.message));
 }
 
@@ -596,7 +643,7 @@ async function tick(task, { client }) {
     const ping = rolePing(task.guild_id);
     const content = ping.text + fill(draw(null, 'preAnnounce'), { prize_line: prizeLine(task.params || {}), start_time: ts(runAt, 'R') });
     const channel = await getTextChannel(client, task.channel_id);
-    if (channel) await channel.send({ content, allowedMentions: { parse: [], ...ping.allowed } }).catch((err) => console.error('rumble heads-up:', err.message));
+    if (channel && (await sameGuild(channel, task.guild_id, task.id, client, 'ping'))) await channel.send({ content, allowedMentions: { parse: [], ...ping.allowed } }).catch((err) => console.error('rumble heads-up:', err.message));
     return;
   }
   if (now >= runAt && ['pending', 'announced'].includes(task.status)) await openJoin({ ...task, state }, client);
@@ -611,6 +658,7 @@ async function openJoin(task, client) {
   if (games.has(task.channel_id)) return cancelWith('channel_busy', `⚠️ Rumble #${task.id} was cancelled: another game is already running in <#${task.channel_id}>.`);
   const channel = await getTextChannel(client, task.channel_id);
   if (!channel) return cancelWith('no_channel', `⚠️ Rumble #${task.id} was cancelled: I can't find or post in <#${task.channel_id}>. Check RUMBLE_CHANNEL_ID and my permissions.`);
+  if (!(await sameGuild(channel, task.guild_id, task.id, client, 'join message'))) return cancelWith('wrong_server', `⚠️ Rumble #${task.id} was cancelled: its channel is not in this server. Rumble channel not set, run /setup.`);
 
   const now = Date.now();
   const state = {
@@ -1028,6 +1076,11 @@ function runnersEmbed(game, runners) {
 async function announceWinner(game, w) {
   const mention = `<@${w.id}>`;
   const p = (game.params = resolvePrize(game.params)); // a task saved without prize_type / prize_points: re-derived
+  // GUARD: no prize and no winner message unless the channel is in the Rumble's own server
+  const channel = await getTextChannel(game.client, game.channelId);
+  if (channel && !(await sameGuild(channel, game.guildId, game.taskId, game.client, 'prize'))) {
+    return p.prize_type === 'points' ? { ok: false, error: 'blocked: the Rumble channel is not in this server, nothing was paid' } : null;
+  }
   let pay = null;
   let prizePart;
   if (p.prize_type === 'points') {
@@ -1130,7 +1183,7 @@ async function resume(task, client) {
   const s = task.state || {};
   if (s.phase === 'join') {
     const channel = await getTextChannel(client, task.channel_id);
-    if (!channel) {
+    if (!channel || !(await sameGuild(channel, task.guild_id, task.id, client, 'join message'))) {
       await store.update(task.id, { status: 'cancelled', state: { ...s, endReason: 'no_channel' } }, ['running']);
       return reportTo(task.guild_id, client, `⚠️ Rumble #${task.id} was cancelled after a restart: I can't reach <#${task.channel_id}>.`);
     }
@@ -1169,7 +1222,7 @@ async function markMissed(task, client) {
   if (!row) return;
   if (task.status === 'announced') {
     const channel = await getTextChannel(client, task.channel_id);
-    if (channel) await channel.send({ content: '📅 Change of plans: the Rumble Royale is not happening at the announced time. Stay tuned.', allowedMentions: { parse: [] } }).catch(() => {});
+    if (channel && (await sameGuild(channel, task.guild_id, task.id, client, 'message'))) await channel.send({ content: '📅 Change of plans: the Rumble Royale is not happening at the announced time. Stay tuned.', allowedMentions: { parse: [] } }).catch(() => {});
   }
   await reportTo(task.guild_id, client, `⚠️ I was offline at the start time of Rumble #${task.id} (${ts(task.run_at, 't')}), so I skipped it. Order a new one if you still want it.`);
 }
@@ -1192,7 +1245,7 @@ async function cancel(task, { client }) {
   const row = await store.update(task.id, { status: 'cancelled', state: { ...task.state, endReason: 'cancelled' } }, ['pending', 'announced', 'running']);
   if (row && task.status !== 'pending') {
     const channel = await getTextChannel(client, task.channel_id);
-    if (channel) await channel.send({ content: draw(null, 'cancelledByBoss'), allowedMentions: { parse: [] } }).catch(() => {});
+    if (channel && (await sameGuild(channel, task.guild_id, task.id, client, 'message'))) await channel.send({ content: draw(null, 'cancelledByBoss'), allowedMentions: { parse: [] } }).catch(() => {});
   }
   return row ? { ok: true } : null;
 }
@@ -1203,7 +1256,7 @@ async function reschedule(task, date, { client, quiet = false }) {
   const row = await store.update(task.id, { run_at: date.toISOString(), status: 'pending', state: { ...task.state, preAnnounced: false, skipPre } }, ['pending', 'announced']);
   if (row && task.status === 'announced' && !quiet) {
     const channel = await getTextChannel(client, task.channel_id);
-    if (channel) await channel.send({ content: `📅 Change of plans: the Rumble Royale moved to ${ts(date, 't')} (${ts(date, 'R')}).`, allowedMentions: { parse: [] } }).catch(() => {});
+    if (channel && (await sameGuild(channel, task.guild_id, task.id, client, 'message'))) await channel.send({ content: `📅 Change of plans: the Rumble Royale moved to ${ts(date, 't')} (${ts(date, 'R')}).`, allowedMentions: { parse: [] } }).catch(() => {});
   }
   return row;
 }
@@ -1215,6 +1268,7 @@ async function reschedule(task, date, { client, quiet = false }) {
 async function handleMessage(message, { mayReply = true } = {}) {
   const game = games.get(message.channelId);
   if (!game || game.ended) return false;
+  if (message.guildId && String(message.guildId) !== game.guildId) return false; // never another server's game
   const now = Date.now();
   if (mayReply && now - game.lastChatAt >= CHAT_GAP_MS && game.lastChatTo !== message.author.id && Math.random() < CHAT_CHANCE) {
     game.lastChatAt = now;
@@ -1246,6 +1300,7 @@ function isStaff(interaction) {
 async function handleJoin(interaction, taskId) {
   const game = gameByTask(taskId);
   if (!game || game.phase !== 'join') return interaction.reply(ephemeral(draw(null, 'joinClosed')));
+  if (interaction.guildId && String(interaction.guildId) !== game.guildId) return interaction.reply(ephemeral(draw(null, 'joinClosed'))); // a button from another server
   const uid = String(interaction.user.id);
   if (game.players.has(uid)) return interaction.reply(ephemeral(draw(game, 'joinAlready')));
   const gs = guilds.settings(game.guildId);
@@ -1293,7 +1348,7 @@ async function slashStart(interaction) {
     join_minutes: opt.getInteger('minutes') ?? null,
     prize: opt.getString('prize') ?? null,
     min_players: opt.getInteger('min_players') ?? null,
-  }, interaction.guildId);
+  }, interaction.guildId, interaction.client);
   if (built.error) return interaction.editReply(built.error);
   // a points prize is paid from this server's points system: only where that feature is on (HΛVØCZ: always)
   if (built.params.prize_type === 'points' && !require('../plans').hasFeature(interaction, 'points')) {
@@ -1367,7 +1422,7 @@ async function handlePreviewButton(interaction, action, token) {
   }
   previews.delete(token);
   await interaction.deferUpdate();
-  const res = await createRumble({ params: p.params, runAt: new Date(Date.now() + p.startIn * MIN), createdBy: interaction.user.id, source: 'manual', guildId: interaction.guildId });
+  const res = await createRumble({ params: p.params, runAt: new Date(Date.now() + p.startIn * MIN), createdBy: interaction.user.id, source: 'manual', guildId: interaction.guildId, client: interaction.client });
   if (res.error) return interaction.editReply({ content: res.error, components: [] });
   await reportTo(interaction.guildId, interaction.client, `🎮 Rumble #${res.row.id} scheduled via /rumble by ${interaction.user.tag || interaction.user.id}: ${describe(res.row)}`);
   return interaction.editReply({ content: `Scheduled! ${describe(res.row)}`, components: [] });

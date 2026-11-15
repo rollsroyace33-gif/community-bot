@@ -175,7 +175,10 @@ function propose(message, kind, draft, describe, summary, run) {
 // summary; this file runs the yes/no flow (plus a second yes for a huge points prize), the
 // "host it right now instead" offer and the "which start time" choice.
 async function plannedOrder(message, ai, handler) {
-  const plan = await handler.planOrder({ ai, text: message.content, createdBy: message.author.id, followUp: !!ai._followUp, guildId: S().guildId });
+  // the server where the order was given (the message's own guild), never a default
+  const guildId = guilds.gid(message);
+  if (guildId !== S().guildId) console.error(`[control] order server ${guildId} differs from control memory ${S().guildId}: using the order's server`);
+  const plan = await handler.planOrder({ ai, text: message.content, createdBy: message.author.id, followUp: !!ai._followUp, guildId, client: message.client });
   return presentPlan(message, handler, plan, opener(ai));
 }
 
