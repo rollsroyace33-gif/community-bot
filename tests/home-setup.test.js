@@ -187,15 +187,16 @@ async function resetHome(settings = {}) {
     const boss = slash(REMO, { manage: false }); // the boss without Manage Server
     await setupCmd.execute(boss);
     const t = text(boss);
-    assert.match(t, /Vexo setup · home server/);
+    assert.ok(t.startsWith('-# build: rumble-guild-fix-v1\n'), 'the build marker is the first line of /setup');
+    assert.match(t, /\*\*Vexo setup\*\*/);
+    assert.ok(!/nothing to set\s+up/i.test(t), 'the old home-server refusal is gone');
     assert.match(t, /Control: <#home-ctl> \(\.env\)/);
     assert.match(t, /SOL Radar: \*not set\*/);
-    assert.match(t, /Missing channels: .*NFT Radar.*SOL Radar.*Giveaways|Missing channels: .*SOL Radar.*NFT Radar.*Giveaways/);
-    assert.ok(!/Missing channels: .*X posts/.test(t), 'the button only handles SOL Radar, NFT Radar and Giveaways');
+    assert.match(t, /Missing: .*(SOL Radar|NFT Radar|Giveaways).*\(press \*\*Create missing channels\*\*\)/);
+    assert.ok(!/Missing: .*X posts/.test(t), 'the button only handles SOL Radar, NFT Radar and Giveaways');
     assert.equal(homeGuild.created.length, 0, 'opening /setup creates nothing');
     const values = menuValues(boss);
-    for (const k of ['ch:control', 'ch:logs', 'ch:marketplace', 'ch:rumble', 'ch:games', 'ch:xDrop', 'ch:giveaway', 'ch:nftRadar', 'ch:solRadar', 'ch:welcome', 'ch:ask', 'role', 'sources']) assert.ok(values.includes(k), `menu has ${k}`);
-    assert.ok(!values.includes('boss') && !values.includes('ticket'), 'boss and ticket text are not changed in HΛVØCZ');
+    for (const k of ['ch:control', 'ch:logs', 'ch:marketplace', 'ch:rumble', 'ch:games', 'ch:xDrop', 'ch:giveaway', 'ch:nftRadar', 'ch:solRadar', 'ch:welcome', 'ch:ask', 'role', 'sources', 'boss', 'ticket']) assert.ok(values.includes(k), `menu has ${k}`);
     const button = boss.out.at(-1).components[1].toJSON().components[0];
     assert.equal(button.custom_id, 'setup:createhome');
     assert.equal(button.label, 'Create missing channels (3)');
@@ -390,7 +391,7 @@ async function resetHome(settings = {}) {
     assert.match(t, /Welcome: <#home-welcome> · from \.env/);
     assert.match(t, /X posts: not set/);
     assert.match(t, /Logs: <#home-logs> · from \.env \(LOGS_CHANNEL_ID\)/);
-    assert.equal(it.out[0].embeds[0].toJSON().footer.text, 'build: home-setup-v2', 'the build marker is at the bottom of /status');
+    assert.equal(it.out[0].embeds[0].toJSON().footer.text, 'build: rumble-guild-fix-v1', 'the build marker is at the bottom of /status');
     assert.match(t, /NFT Radar: not set/);
   });
 
@@ -413,18 +414,60 @@ async function resetHome(settings = {}) {
     assert.ok(!learn._test.buffers.has(HOME));
   });
 
-  say('== 5. Customer servers unchanged ==');
-  await test('a customer server: /setup still runs its automatic setup and offers boss + ticket text', async () => {
+  say('== 5. The same /setup in every server ==');
+  await test('a customer server and HΛVØCZ get the SAME menu; the customer server still runs its automatic setup', async () => {
+    await resetHome();
+    const home = slash(REMO);
+    await setupCmd.execute(home);
     const g = fakeGuild(A);
     g.client = client;
     const it = slash(ADMIN, { guild: g });
     await setupCmd.execute(it);
+    assert.ok(text(it).startsWith('-# build: rumble-guild-fix-v1\n'));
     assert.match(text(it), /\*\*Vexo setup\*\*/);
     assert.ok(g.created.includes('vexo-control') && g.created.includes('📈・sol-radar'));
-    const values = menuValues(it);
-    assert.ok(values.includes('boss') && values.includes('ticket'));
-    assert.ok(!values.includes('ch:welcome') && !values.includes('ch:ask'));
-    assert.equal(it.out.at(-1).components.length, 1, 'no create button outside HΛVØCZ');
+    // identical options (Get Vexo Assistant only where Personal Vexo is on: on in HΛVØCZ, off in this server)
+    const same = (v) => v.filter((x) => x !== 'ch:assistant');
+    assert.deepEqual(same(menuValues(it)), same(menuValues(home)));
+    for (const k of ['boss', 'ticket', 'ch:welcome', 'ch:ask']) assert.ok(menuValues(it).includes(k));
+    assert.equal(it.out.at(-1).components.length, 1, 'no create button outside HΛVØCZ (it gets its channels automatically)');
+    assert.equal(home.out.at(-1).components.length, 2, 'HΛVØCZ: the same menu + the Create missing channels button');
+  });
+
+  await test('HΛVØCZ boss and ticket text: /setup first, BOSS_USER_ID / the usual ticket button when not chosen', async () => {
+    await resetHome();
+    const identity = require(src('identity.js'));
+    assert.equal(guilds.settings(HOME).bossUserId, REMO, 'not chosen: BOSS_USER_ID');
+    assert.equal(guilds.settings(HOME).ticketInstructions, null, 'not chosen: the usual HΛVØCZ ticket button');
+    await setupCmd.handleComponent(comp('setup:boss', [ADMIN]));
+    assert.equal(guilds.settings(HOME).bossUserId, ADMIN);
+    assert.ok(identity.isBoss(ADMIN, HOME) && !identity.isBoss(REMO, HOME));
+    const modal = comp('setup:ticketmodal');
+    modal.fields = { getTextInputValue: () => 'DM a mod with your prize name.' };
+    await setupCmd.handleComponent(modal);
+    assert.equal(guilds.settings(HOME).ticketInstructions, 'DM a mod with your prize name.');
+    // the customer servers keep their own boss
+    assert.equal(guilds.settings(A).bossUserId, ADMIN);
+    await resetHome();
+    assert.equal(guilds.settings(HOME).bossUserId, REMO);
+  });
+
+  await test('welcome and ask channels work in a customer server too (only when chosen; never another channel)', async () => {
+    const onJoin = require(src('events/guildMemberAdd.js'));
+    homeGuild.add({ id: 'a-welcome', name: 'welcome' }); // reachable through the fake client
+    const member = (id) => ({ id, user: { bot: false }, guild: { id: A }, client });
+    sent.length = 0;
+    await onJoin(member('900000000000000001')); // no welcome channel chosen yet: nothing
+    assert.equal(sent.length, 0);
+    await guilds.patchSettings(A, { channels: { welcome: 'a-welcome', ask: 'a-ask' } });
+    assert.equal(guilds.settings(A).channels.ask, 'a-ask');
+    await onJoin(member('900000000000000002'));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].ch, 'a-welcome');
+    assert.ok(sent[0].content.includes('<@900000000000000002>'));
+    await onJoin(member('900000000000000002')); // the same member again: no second welcome
+    assert.equal(sent.length, 1);
+    await guilds.patchSettings(A, { channels: { welcome: '', ask: '' } });
   });
 
   quiet.log(`\n${passed} passed, ${failed} failed`);
