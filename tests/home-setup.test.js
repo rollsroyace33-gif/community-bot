@@ -187,7 +187,7 @@ async function resetHome(settings = {}) {
     const boss = slash(REMO, { manage: false }); // the boss without Manage Server
     await setupCmd.execute(boss);
     const t = text(boss);
-    assert.ok(t.startsWith('-# build: unprompted-qa-fix-v1\n'), 'the build marker is the first line of /setup');
+    assert.ok(t.startsWith('-# build: unprompted-qa-fix-v2\n'), 'the build marker is the first line of /setup');
     assert.match(t, /\*\*Vexo setup\*\*/);
     assert.ok(!/nothing to set\s+up/i.test(t), 'the old home-server refusal is gone');
     assert.match(t, /Control: <#home-ctl> \(\.env\)/);
@@ -391,7 +391,7 @@ async function resetHome(settings = {}) {
     assert.match(t, /Welcome: <#home-welcome> · from \.env/);
     assert.match(t, /X posts: not set/);
     assert.match(t, /Logs: <#home-logs> · from \.env \(LOGS_CHANNEL_ID\)/);
-    assert.equal(it.out[0].embeds[0].toJSON().footer.text, 'build: unprompted-qa-fix-v1', 'the build marker is at the bottom of /status');
+    assert.equal(it.out[0].embeds[0].toJSON().footer.text, 'build: unprompted-qa-fix-v2', 'the build marker is at the bottom of /status');
     assert.match(t, /NFT Radar: not set/);
   });
 
@@ -423,7 +423,7 @@ async function resetHome(settings = {}) {
     g.client = client;
     const it = slash(ADMIN, { guild: g });
     await setupCmd.execute(it);
-    assert.ok(text(it).startsWith('-# build: unprompted-qa-fix-v1\n'));
+    assert.ok(text(it).startsWith('-# build: unprompted-qa-fix-v2\n'));
     assert.match(text(it), /\*\*Vexo setup\*\*/);
     assert.ok(g.created.includes('vexo-control') && g.created.includes('📈・sol-radar'));
     // identical options (Get Vexo Assistant only where Personal Vexo is on: on in HΛVØCZ, off in this server)
