@@ -1,6 +1,6 @@
 # Vexo upgrade: progress (single source of truth)
 
-Last updated: 2026-11-14. The full instructions are in `docs/VEXO_UPGRADE_SPEC.md`. The audit and plan are in `docs/VEXO_UPGRADE_PLAN.md`.
+Last updated: 2026-11-17. The full instructions are in `docs/VEXO_UPGRADE_SPEC.md`. The audit and plan are in `docs/VEXO_UPGRADE_PLAN.md`.
 On "resume": read the spec, read this file, run the syntax check and `npm test`, report, wait for OK.
 
 ## Phases
@@ -56,6 +56,28 @@ On "resume": read the spec, read this file, run the syntax check and `npm test`,
 - Not tested for real: Discord buttons in a real server, the real AI research answer quality. Tavily itself was checked live (works).
 - Exact next action for Claude: WAIT. Fix only what the owner reports. When the owner says NFT Radar works, mark phase 3 DONE. Next planned phase: 5 (Full Web3 AI assistant), only after the owner's written OK.
 
+## Fix (2026-11-17): unprompted Q&A + "about Vexo" — BUILT, WAITING FOR MY TEST (build "unprompted-qa-fix-v1")
+
+- Owner: Vexo used to answer project questions in normal chat without a mention; now only when mentioned (HΛVØCZ and customer servers). Also: answer questions about Vexo itself (features, updates, roadmap, trial / premium, setup), mention or not. This answers Q2 ("unmentioned-question fix").
+- Root cause (investigation): there was never a "looks like a question" check in normal chat. Every version (all backups) answers an un-addressed member ONLY in the Q&A channel: `src/replies.js:238` `if (isAsk || addr.any)`, `isAsk` = message in `settings.channels.ask`. HΛVØCZ got unprompted answers only because ASK_CHANNEL_ID was its chat channel (#open-floor, see the comment in replies.js bossMessage). Since the home /setup work (`src/guilds.js:92`, `{ ...homeEnvChannels(), ...homeChosen(row) }`) a /setup "Ask channel" choice overrides ASK_CHANNEL_ID, so choosing another channel there (or ASK_CHANNEL_ID missing on Render) silently ends unprompted answers in the chat channel. Customer servers: `otherSettings().channels.ask` is '' unless chosen in /setup and auto setup never creates one -> mention only, always. Not the cause: plans.hasFeature (home always true), Message Content intent, ratelimit keys (per guild:user, fine), knowledge lookup (per guild, home falls back to knowledge.md). Not checked: the live DB / Render env (not allowed).
+- Fix: NEW `src/unprompted.js` (cheap checks: Knowledge Q&A plan, allowed chat channel, not talking to someone else, question shape + project / Vexo topic, 15 s per-channel cooldown) -> one AI call with silentIfCasual (casual = silence) and new `silentIfUnknown` (not in knowledge = silence, still recorded for the boss). NEW `src/aboutVexo.js` (global ABOUT VEXO block from config.features + PLANNED list from this file's phases 5-15; `isAboutVexo`). `src/ai.js`: options `aboutVexo`, `silentIfUnknown` (off = prompt unchanged; snapshot 12/12 identical). `src/replies.js`: step b2 (unprompted) before offline chat; aboutVexo flag on every conversation; ⏳ on creator-question limit only in #ask. `src/build.js` BUILD "unprompted-qa-fix-v1".
+- Never answers unprompted in: control, logs (and any channel named *log*), shop, purchase logs, receipts, rumble, giveaways, SOL / NFT Radar, assistant, X posts, welcome, rules, tickets, EXCLUDED_CHANNEL_IDS; only CHAT_CHANNEL_IDS when set (HΛVØCZ). Bots never. Boss gate unchanged. Free-plan servers: silent, zero AI calls.
+- Tests: NEW `tests/unprompted-qa.test.js` (21 pass) added to `npm test` + `npm run test:unprompted`; `tests/home-setup.test.js` build marker. `npm test` all pass; shop, boss-gate, rumble-order, rumble-guild pass; syntax clean.
+- deploy-pack/ = this fix only (old rumble-guild-fix-v1 pack moved to backups/deploy-pack-rumble-guild-fix-v1). SQL: none. .env: none.
+
+## Extra request 4 (2026-11-15): one /setup for every server — BUILT, WAITING FOR MY TEST (not deployed; build "setup-unified-v1")
+
+- Owner: HΛVØCZ still shows the old refusal. Proof: that text exists only in backups/before-home-setup/src/commands/setup.js:62 (old `if (guilds.isHome(interaction)) return interaction.reply(...)`); the current code has no such branch -> the live bot runs an old upload.
+- New rule: the SAME /setup options in every server; only allowed differences: .env fallback in HΛVØCZ and the "Create missing channels" button there (no automatic creation). BUILD = "setup-unified-v1" (startup, first line of /setup, /status footer). deploy-pack/ with files new/changed since backups/before-home-setup-2/.
+- Plan: U.1 one channel list for all servers (+ welcome and ask for customer servers: otherSettings + per-server welcome in events/guildMemberAdd.js); U.2 boss + ticket text also in HΛVØCZ (/setup first, then BOSS_USER_ID / old wording; bossCover + setup.js use settings boss); U.3 build marker; U.4 /status welcome + ask lines everywhere; U.5 tests; U.6 deploy-pack.
+- U.1 DONE: src/guilds.js (customer servers: welcome + ask from /setup; HΛVØCZ: assistant in HOME_CHANNEL_KEYS); src/events/guildMemberAdd.js rewritten (welcomes per server, own bulk counter per server, no welcome channel = no welcome).
+- U.2 DONE: src/commands/setup.js rewritten: ONE channel list + role + sources + boss + ticket for every server; HΛVØCZ only adds .env fallback ("choose none") and the Create button; build line first. src/guilds.js: HΛVØCZ boss = guilds.boss_user_id (/setup) else BOSS_USER_ID; ticket text = chosen text else the usual HΛVØCZ ticket button. src/bossCover.js + src/setup.js read the boss from settings.
+- U.3 DONE: src/build.js BUILD = "setup-unified-v1" (startup "Logged in as ... build:", first line of every /setup reply, /status footer). src/commands/status.js: Welcome, Ask and Get Vexo Assistant lines in every server.
+- U.4 DONE: tests/home-setup.test.js (18 pass: same menu in HΛVØCZ and a customer server, build line first, HΛVØCZ boss / ticket from /setup with fallback, welcome + ask in a customer server). Syntax 102 files OK; `npm test` all pass; shop 15, boss-gate 31, rumble-order 24. Search for the old refusal text (excl. backups, node_modules, .env): 0 matches (only in backups/before-home-setup/src/commands/setup.js:62 and :82).
+- U.5 DONE: .gitignore + `deploy-pack/`. deploy-pack/ = 28 files new/changed since backups/before-home-setup-2 (src 20, tests 4, .env.example, .gitignore, README.md, docs/VEXO_UPGRADE_PROGRESS.md). package.json / package-lock.json unchanged. Nothing to delete on GitHub. WARNING: round-1 files (before that backup, never deployed) are NOT in the pack: src/ai.js, learn.js, automod.js, offlineChat.js, commands/knowledge.js, commands/nftradar.js, commands/solradar.js, tasks/scheduler.js, package.json.
+- Other HΛVØCZ differences kept on purpose (none blocks a /setup channel): no automatic channels (setup.js), .env fallback (guilds.js), plan "home" = every feature, no AI limit (plans.js), scam protection off by default (scam.js), knowledge.md + separate source sheet (ai.js, learn.js), /knowledge refresh / clear off, /admin only there, personality lines. Fixed: welcomes were home-only (events/guildMemberAdd.js) -> per server.
+- RESULT: BUILT, WAITING FOR MY TEST. Not deployed. SQL: none. Render: LOGS_CHANNEL_ID (from request 3).
+
 ## Extra request 3 (2026-11-15): finish + prove + build marker — BUILT, WAITING FOR MY TEST (not deployed)
 
 - Owner: only marketplace content may use REDEEM_LOGS_CHANNEL_ID; add BUILD = "home-setup-v2" (startup log + bottom of /status); prove with searches; upload list vs backups/before-home-setup-2; no deploy.
@@ -65,7 +87,7 @@ On "resume": read the spec, read this file, run the syntax check and `npm test`,
 - B.2 DONE: new src/build.js (BUILD = "home-setup-v2"); src/index.js prints "Logged in as <tag> build: home-setup-v2"; src/commands/status.js footer "build: home-setup-v2".
 - B.3 DONE: README (logs rule, button, build marker), nftRadar.js comment.
 - B.4 DONE: tests giveaway / solradar / nftradar get LOGS_CHANNEL_ID in their fake env; home-setup: separate purchase-log channel, tests for "never REDEEM_LOGS / control / shop", "purchase records are the only REDEEM_LOGS user", build marker in /status (16 pass). marketplace.js: sendLog exposed on `_test` only. Syntax check 102 files OK; `npm test` all pass; shop 15, boss-gate 31, rumble-order 24.
-- Proof searches (excl. backups, node_modules, .env): "nothing to set up" = 0 matches (one history line in this file reworded). REDEEM_LOGS_CHANNEL_ID in code only in config.js (purchase records) + comments / hints; `redeemLogs` is sent to only by marketplace.js (purchase log + ticket transcript). logsChannelId = getFeatureChannel(x, 'logs') everywhere.
+- Proof searches (excl. backups, node_modules, .env): the old refusal text = 0 matches (one history line in this file reworded). REDEEM_LOGS_CHANNEL_ID in code only in config.js (purchase records) + comments / hints; `redeemLogs` is sent to only by marketplace.js (purchase log + ticket transcript). logsChannelId = getFeatureChannel(x, 'logs') everywhere.
 - B.5 DONE: upload list. vs backups/before-home-setup-2: NEW src/build.js, src/notices.js; CHANGED src/ bossCover, config, giveaway, guilds, index, marketplace, nftRadar, scam, setup, solRadar, xDrop; src/commands/ guess, setup, status; src/events/guildMemberAdd; src/jobs/daily; src/tasks/control, rumbleRoyale; tests/ giveaway, home-setup, nftradar, solradar; root .env.example, README.md; docs/VEXO_UPGRADE_PROGRESS.md. package.json / package-lock.json NOT changed since that backup. Nothing to delete on GitHub. WARNING: round 1 (before that backup) was never deployed either: also needed src/ai.js, learn.js, automod.js, offlineChat.js, commands/knowledge.js, commands/nftradar.js, commands/solradar.js, tasks/scheduler.js and package.json -> advice: upload the whole src/ and tests/ folders.
 - RESULT: BUILT, WAITING FOR MY TEST. Not deployed. SQL: none. New Render variable: LOGS_CHANNEL_ID (HΛVØCZ private logs channel, NOT the shop). Live: until LOGS_CHANNEL_ID is set or a logs channel is chosen in /setup, HΛVØCZ feature logs are not sent (purchase records unchanged).
 
@@ -276,7 +298,7 @@ Accepted on 2026-11-14 by the owner's "ok" to the Phase 1 report (Claude's readi
 
 ## Questions waiting for the owner's answer
 
-- Q2: What exactly should the "unmentioned-question fix" do? No code for it was found. Needed before Phase 5 (same file, `src/replies.js`).
+- Q2: ANSWERED 2026-11-17 and built (see "Fix (2026-11-17): unprompted Q&A").
 - (Q9 is answered, see below.)
 
 Answered on 2026-11-14 in the owner's words: "i use uptime robot" → Q9: Render stays on the free plan, kept awake by UptimeRobot pinging `/health` every 5 minutes. Consequences to remember: this uses almost all 750 free hours a month (only ONE free service in the Render workspace); if a ping gap lets the bot sleep, schedulers pause, so SOL Radar must catch up with at most the newest missed slot and reminders must be sent late, once.
@@ -284,7 +306,7 @@ Answered on 2026-11-14 in the owner's words: "i use uptime robot" → Q9: Render
 ## Known problems
 
 - Giveaways and multi-server are finished in code and pass offline tests, but are not yet confirmed in real Discord.
-- The "unmentioned-question fix" does not exist in the code.
+- The "unmentioned-question fix": built 2026-11-17 (unprompted-qa-fix-v1), waiting for the owner's live test.
 - Direct messages to the bot do not work today (needed for Personal Vexo, see question 4).
 - No reliable free feed of upcoming Solana mints exists; NFT Radar candidates will be uneven and rely on admin approval.
 - Render's free plan sleeps after 15 minutes without web traffic, which stops all schedulers.
